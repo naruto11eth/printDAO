@@ -160,3 +160,85 @@ class Trade:
 
 
 @dataclass
+class Activity:
+    """On-chain activity on Polymarket."""
+    proxy_wallet: str
+    timestamp: int
+    condition_id: str
+    activity_type: ActivityType
+    size: float
+    usdc_size: float
+    transaction_hash: str
+    price: Optional[float]
+    asset: str
+    side: Optional[TradeSide]
+    outcome_index: int
+    title: str
+    slug: str
+    icon: Optional[str]
+    event_slug: str
+    outcome: str
+
+    @classmethod
+    def from_api(cls, data: dict) -> "Activity":
+        """Create Activity from API response."""
+        activity_type = data.get("type", "TRADE")
+        side_str = data.get("side")
+        return cls(
+            proxy_wallet=data.get("proxyWallet", ""),
+            timestamp=int(data.get("timestamp", 0)),
+            condition_id=data.get("conditionId", ""),
+            activity_type=ActivityType(activity_type),
+            size=float(data.get("size", 0)),
+            usdc_size=float(data.get("usdcSize", 0)),
+            transaction_hash=data.get("transactionHash", ""),
+            price=float(data.get("price")) if data.get("price") else None,
+            asset=data.get("asset", ""),
+            side=TradeSide(side_str) if side_str else None,
+            outcome_index=int(data.get("outcomeIndex", 0)),
+            title=data.get("title", ""),
+            slug=data.get("slug", ""),
+            icon=data.get("icon"),
+            event_slug=data.get("eventSlug", ""),
+            outcome=data.get("outcome", ""),
+        )
+
+    @property
+    def datetime(self) -> datetime:
+        """Get activity datetime."""
+        return datetime.fromtimestamp(self.timestamp)
+
+
+@dataclass
+class PortfolioValue:
+    """User's total portfolio value."""
+    user: str
+    total_value: float
+
+    @classmethod
+    def from_api(cls, data: dict) -> "PortfolioValue":
+        """Create PortfolioValue from API response."""
+        return cls(
+            user=data.get("user", ""),
+            total_value=float(data.get("value", 0)),
+        )
+
+
+@dataclass
+class PnLSummary:
+    """PnL summary for a user over a time period."""
+    address: str
+    period: str  # day, week, month, all
+    total_pnl: float
+    realized_pnl: float
+    unrealized_pnl: float
+    win_rate: float
+    total_trades: int
+    winning_trades: int
+    losing_trades: int
+    positions: list[Position] = field(default_factory=list)
+
+    @property
+    def is_profitable(self) -> bool:
+        """Check if overall profitable."""
+        return self.total_pnl > 0
