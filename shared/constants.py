@@ -69,3 +69,21 @@ REDIS_KEYS = {
 }
 
 # Alert types
+class AlertType:
+    NEW_WHALE_DISCOVERED = "new_whale_discovered"
+    LARGE_TRADE = "large_trade"
+    TRACKED_WALLET_TRADE = "tracked_wallet_trade"
+    PNL_LEADERBOARD = "pnl_leaderboard"
+
+# Trade actions
+class TradeAction:
+    LONG = "LONG"
+    SHORT = "SHORT"
+    CLOSE_LONG = "CLOSE_LONG"
+    CLOSE_SHORT = "CLOSE_SHORT"
+    INCREASE = "INCREASE"
+    DECREASE = "DECREASE"
+    BUY_YES = "BUY_YES"
+    BUY_NO = "BUY_NO"
+    SELL_YES = "SELL_YES"
+    SELL_NO = "SELL_NO"
