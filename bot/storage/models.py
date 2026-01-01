@@ -62,3 +62,67 @@ class WalletGroup:
 
 
 @dataclass
+class WhaleInfo:
+    """Information about a discovered whale."""
+    address: str
+    exchange: str
+    first_seen: float = field(default_factory=time.time)
+    total_volume: float = 0.0
+    trade_count: int = 0
+    last_active: float = field(default_factory=time.time)
+    pnl_all_time: Optional[float] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for storage."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "WhaleInfo":
+        """Create from dictionary."""
+        return cls(**data)
+
+
+@dataclass
+class WhaleAlert:
+    """An alert about whale activity."""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:12])
+    alert_type: str = ""  # From AlertType constants
+    wallet: str = ""
+    exchange: str = ""
+    trade_value: float = 0.0
+    side: Optional[str] = None  # BUY/SELL or LONG/SHORT
+    asset: Optional[str] = None
+    market_title: Optional[str] = None
+    price: Optional[float] = None
+    size: Optional[float] = None
+    timestamp: float = field(default_factory=time.time)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return asdict(self)
+
+
+@dataclass
+class CopyTradeSignal:
+    """A copy trading signal when tracked wallet trades."""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:12])
+    source_wallet: str = ""
+    source_label: Optional[str] = None
+    action: str = ""  # LONG, SHORT, BUY_YES, etc.
+    exchange: str = ""
+    asset: str = ""
+    amount: float = 0.0
+    price: float = 0.0
+    notional_usd: float = 0.0
+    leverage: Optional[int] = None  # For perps
+    outcome: Optional[str] = None  # For prediction markets (YES/NO)
+    market_title: Optional[str] = None
+    timestamp: float = field(default_factory=time.time)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return asdict(self)
+
+
+@dataclass
