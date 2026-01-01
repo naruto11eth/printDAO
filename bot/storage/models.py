@@ -126,3 +126,64 @@ class CopyTradeSignal:
 
 
 @dataclass
+class PnLResult:
+    """PnL calculation result for a wallet."""
+    wallet: str
+    exchange: str
+    period: str  # day, week, month, all
+    cash_pnl: float = 0.0
+    percent_pnl: float = 0.0
+    portfolio_value: float = 0.0
+    position_count: int = 0
+    calculated_at: float = field(default_factory=time.time)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for caching."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PnLResult":
+        """Create from dictionary."""
+        return cls(**data)
+
+
+@dataclass
+class Position:
+    """A trading position."""
+    wallet: str
+    exchange: str
+    market_id: str
+    asset: Optional[str] = None
+    outcome: Optional[str] = None  # For prediction markets
+    market_title: Optional[str] = None
+    size: float = 0.0
+    avg_price: float = 0.0
+    current_price: float = 0.0
+    current_value: float = 0.0
+    unrealized_pnl: float = 0.0
+    realized_pnl: float = 0.0
+    leverage: Optional[int] = None  # For perps
+    direction: Optional[str] = None  # long/short for perps
+    timestamp: float = field(default_factory=time.time)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return asdict(self)
+
+
+@dataclass
+class ServiceResult:
+    """Generic result from service operations."""
+    success: bool
+    error: Optional[str] = None
+    data: Optional[Any] = None
+
+    @classmethod
+    def ok(cls, data: Any = None) -> "ServiceResult":
+        """Create a successful result."""
+        return cls(success=True, data=data)
+
+    @classmethod
+    def fail(cls, error: str) -> "ServiceResult":
+        """Create a failed result."""
+        return cls(success=False, error=error)
