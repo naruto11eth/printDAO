@@ -70,3 +70,89 @@ class Trade:
 
 
 @dataclass
+class Position:
+    """A user's position on Hyperliquid."""
+    coin: str
+    size: Decimal
+    entry_px: Decimal
+    liquidation_px: Optional[Decimal]
+    unrealized_pnl: Decimal
+    leverage: Optional[Decimal]
+    margin_used: Decimal
+    position_value: Decimal
+    return_on_equity: Decimal
+
+    @classmethod
+    def from_raw(cls, data: dict) -> "Position":
+        """Create Position from user_state API response."""
+        pos = data.get("position", data)
+        return cls(
+            coin=pos.get("coin", ""),
+            size=Decimal(str(pos.get("szi", "0"))),
+            entry_px=Decimal(str(pos.get("entryPx", "0"))) if pos.get("entryPx") else Decimal("0"),
+            liquidation_px=Decimal(str(pos.get("liquidationPx"))) if pos.get("liquidationPx") else None,
+            unrealized_pnl=Decimal(str(pos.get("unrealizedPnl", "0"))),
+            leverage=Decimal(str(pos.get("leverage", {}).get("value", "0"))) if pos.get("leverage") else None,
+            margin_used=Decimal(str(pos.get("marginUsed", "0"))),
+            position_value=Decimal(str(pos.get("positionValue", "0"))),
+            return_on_equity=Decimal(str(pos.get("returnOnEquity", "0"))),
+        )
+
+    @property
+    def direction(self) -> Direction:
+        """Get position direction."""
+        return Direction.LONG if self.size > 0 else Direction.SHORT
+
+    @property
+    def abs_size(self) -> Decimal:
+        """Get absolute position size."""
+        return abs(self.size)
+
+    @property
+    def is_profitable(self) -> bool:
+        """Check if position is profitable."""
+        return self.unrealized_pnl > 0
+
+
+@dataclass
+class Fill:
+    """A trade fill for a user."""
+    coin: str
+    side: TradeSide
+    size: Decimal
+    price: Decimal
+    time_ms: int
+    closed_pnl: Decimal
+    hash: str
+    fee: Decimal
+    start_position: Decimal
+    direction: str  # "Open Long", "Close Short", etc.
+
+    @classmethod
+    def from_raw(cls, data: dict) -> "Fill":
+        """Create Fill from user_fills API response."""
+        return cls(
+            coin=data.get("coin", ""),
+            side=TradeSide(data.get("side", "B")),
+            size=Decimal(str(data.get("sz", "0"))),
+            price=Decimal(str(data.get("px", "0"))),
+            time_ms=int(data.get("time", 0)),
+            closed_pnl=Decimal(str(data.get("closedPnl", "0"))),
+            hash=data.get("hash", ""),
+            fee=Decimal(str(data.get("fee", "0"))),
+            start_position=Decimal(str(data.get("startPosition", "0"))),
+            direction=data.get("dir", ""),
+        )
+
+    @property
+    def datetime(self) -> datetime:
+        """Get fill datetime."""
+        return datetime.fromtimestamp(self.time_ms / 1000)
+
+    @property
+    def notional_usd(self) -> Decimal:
+        """Calculate notional value."""
+        return self.price * self.size
+
+
+@dataclass
