@@ -156,3 +156,102 @@ class Fill:
 
 
 @dataclass
+class AssetContext:
+    """Market context for an asset."""
+    coin: str
+    mark_px: Optional[Decimal]
+    mid_px: Optional[Decimal]
+    funding_rate: Optional[Decimal]
+    open_interest: Optional[Decimal]
+    day_ntl_vlm: Optional[Decimal]  # 24h notional volume
+    prev_day_px: Optional[Decimal]
+
+    @classmethod
+    def from_raw(cls, coin: str, data: dict) -> "AssetContext":
+        """Create AssetContext from API response."""
+        return cls(
+            coin=coin,
+            mark_px=Decimal(str(data.get("markPx"))) if data.get("markPx") else None,
+            mid_px=Decimal(str(data.get("midPx"))) if data.get("midPx") else None,
+            funding_rate=Decimal(str(data.get("funding"))) if data.get("funding") else None,
+            open_interest=Decimal(str(data.get("openInterest"))) if data.get("openInterest") else None,
+            day_ntl_vlm=Decimal(str(data.get("dayNtlVlm"))) if data.get("dayNtlVlm") else None,
+            prev_day_px=Decimal(str(data.get("prevDayPx"))) if data.get("prevDayPx") else None,
+        )
+
+    @property
+    def price_change_24h(self) -> Optional[Decimal]:
+        """Calculate 24h price change percentage."""
+        if self.mark_px and self.prev_day_px and self.prev_day_px != 0:
+            return ((self.mark_px - self.prev_day_px) / self.prev_day_px) * 100
+        return None
+
+
+@dataclass
+class UserState:
+    """Complete user state from Hyperliquid."""
+    address: str
+    account_value: Decimal
+    total_margin_used: Decimal
+    total_ntl_pos: Decimal  # Total notional position
+    withdrawable: Decimal
+    positions: list[Position]
+
+    @classmethod
+    def from_raw(cls, address: str, data: dict) -> "UserState":
+        """Create UserState from API response."""
+        margin_summary = data.get("marginSummary", {})
+        positions = [
+            Position.from_raw(p)
+            for p in data.get("assetPositions", [])
+            if Decimal(str(p.get("position", {}).get("szi", "0"))) != 0
+        ]
+
+        return cls(
+            address=address,
+            account_value=Decimal(str(margin_summary.get("accountValue", "0"))),
+            total_margin_used=Decimal(str(margin_summary.get("totalMarginUsed", "0"))),
+            total_ntl_pos=Decimal(str(margin_summary.get("totalNtlPos", "0"))),
+            withdrawable=Decimal(str(data.get("withdrawable", "0"))),
+            positions=sorted(positions, key=lambda p: abs(p.size), reverse=True),
+        )
+
+    @property
+    def total_pnl(self) -> Decimal:
+        """Calculate total unrealized PnL."""
+        return sum((p.unrealized_pnl for p in self.positions), Decimal("0"))
+
+
+@dataclass
+class SentimentSummary:
+    """Market sentiment summary."""
+    coin: str
+    period_hours: float
+    total_trades: int
+    long_count: int
+    short_count: int
+    long_volume: Decimal
+    short_volume: Decimal
+
+    @property
+    def long_pct(self) -> float:
+        """Percentage of long trades."""
+        if self.total_trades == 0:
+            return 0.0
+        return (self.long_count / self.total_trades) * 100
+
+    @property
+    def short_pct(self) -> float:
+        """Percentage of short trades."""
+        if self.total_trades == 0:
+            return 0.0
+        return (self.short_count / self.total_trades) * 100
+
+    @property
+    def sentiment(self) -> str:
+        """Get overall sentiment."""
+        if self.long_pct > 60:
+            return "Bullish"
+        elif self.short_pct > 60:
+            return "Bearish"
+        return "Neutral"
