@@ -262,3 +262,57 @@ class PolymarketTracker:
             "positions": positions,
         }
 
+
+class WhaleDetector:
+    """Detects whale activity across Polymarket."""
+
+    def __init__(
+        self,
+        client: PolymarketClient,
+        whale_threshold: float = 10000.0,
+    ):
+        self.client = client
+        self.whale_threshold = whale_threshold
+        self._seen_tx_hashes: set[str] = set()
+        self._running = False
+
+    async def scan_for_whales(
+        self,
+        callback: Callable[[Trade], Awaitable[None]],
+        poll_interval: float = 15.0,
+    ) -> None:
+        """Continuously scan for new whale trades.
+
+        Args:
+            callback: Async function to call on new whale trades
+            poll_interval: Seconds between scans
+        """
+        self._running = True
+
+        while self._running:
+            try:
+                trades = await self.client.get_whale_trades(
+                    min_size=self.whale_threshold,
+                    limit=50,
+                )
+
+                for trade in trades:
+                    if trade.transaction_hash not in self._seen_tx_hashes:
+                        self._seen_tx_hashes.add(trade.transaction_hash)
+                        await callback(trade)
+
+                # Limit memory usage - keep last 1000 tx hashes
+                if len(self._seen_tx_hashes) > 1000:
+                    # Remove oldest (arbitrary since set, but keeps bounded)
+                    while len(self._seen_tx_hashes) > 500:
+                        self._seen_tx_hashes.pop()
+
+                await asyncio.sleep(poll_interval)
+
+            except Exception as e:
+                logger.error(f"Error scanning for whales: {e}")
+                await asyncio.sleep(poll_interval)
+
+    def stop(self) -> None:
+        """Stop scanning."""
+        self._running = False
