@@ -88,3 +88,110 @@ class HyperliquidClient:
         self._info: Optional[Info] = None
         self._trade_cache = TradeCache()
         self._coins: List[str] = []
+
+    def _get_info(self) -> Info:
+        """Get or create Info instance."""
+        if self._info is None:
+            self._info = Info(base_url=self.base_url, skip_ws=True)
+        return self._info
+
+    def _retry_request(self, func: Callable, *args, **kwargs):
+        """Execute request with retry logic."""
+        delay = self.backoff_seconds
+
+        for attempt in range(self.max_retries):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if "429" in str(e) and attempt < self.max_retries - 1:
+                    logger.warning(f"Rate limited, waiting {delay}s...")
+                    time.sleep(delay)
+                    delay = min(delay * 2, 10)
+                elif attempt < self.max_retries - 1:
+                    logger.warning(f"Request failed: {e}, retrying...")
+                    time.sleep(delay)
+                else:
+                    raise
+
+    async def get_coins(self) -> List[str]:
+        """Get list of available coins."""
+        if self._coins:
+            return self._coins
+
+        def _fetch():
+            info = self._get_info()
+            meta = info.meta()
+            return [asset["name"] for asset in meta.get("universe", [])]
+
+        self._coins = await asyncio.to_thread(self._retry_request, _fetch)
+        return self._coins
+
+    async def get_recent_trades(self, coin: str, limit: int = 100) -> List[Trade]:
+        """Get recent trades for a coin.
+
+        Args:
+            coin: Coin symbol (e.g., "BTC", "ETH")
+            limit: Max trades to return
+
+        Returns:
+            List of Trade objects
+        """
+        def _fetch():
+            info = self._get_info()
+            raw = info.post("/info", {"type": "recentTrades", "coin": coin})
+            return [Trade.from_raw(coin, item) for item in raw[:limit]]
+
+        trades = await asyncio.to_thread(self._retry_request, _fetch)
+
+        # Add to cache
+        for t in trades:
+            self._trade_cache.add(t)
+
+        return trades
+
+    async def get_user_state(self, address: str) -> UserState:
+        """Get user state including positions.
+
+        Args:
+            address: Wallet address
+
+        Returns:
+            UserState object
+        """
+        def _fetch():
+            info = self._get_info()
+            raw = info.user_state(address)
+            return UserState.from_raw(address, raw)
+
+        return await asyncio.to_thread(self._retry_request, _fetch)
+
+    async def get_user_positions(self, address: str) -> List[Position]:
+        """Get user's open positions.
+
+        Args:
+            address: Wallet address
+
+        Returns:
+            List of Position objects
+        """
+        state = await self.get_user_state(address)
+        return state.positions
+
+    async def get_user_fills(self, address: str, limit: int = 50) -> List[Fill]:
+        """Get user's recent trade fills.
+
+        Args:
+            address: Wallet address
+            limit: Max fills to return
+
+        Returns:
+            List of Fill objects
+        """
+        def _fetch():
+            info = self._get_info()
+            raw = info.user_fills(address)
+            fills = [Fill.from_raw(item) for item in raw]
+            fills.sort(key=lambda f: f.time_ms, reverse=True)
+            return fills[:limit]
+
+        return await asyncio.to_thread(self._retry_request, _fetch)
