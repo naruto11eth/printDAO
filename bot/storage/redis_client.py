@@ -89,3 +89,63 @@ class RedisClient:
         return await self.redis.hexists(key, field)
 
     # --- Set Operations (for wallet subscribers) ---
+
+    async def sadd(self, key: str, *members: str) -> int:
+        """Add one or more members to a set."""
+        return await self.redis.sadd(key, *members)
+
+    async def srem(self, key: str, *members: str) -> int:
+        """Remove one or more members from a set."""
+        return await self.redis.srem(key, *members)
+
+    async def smembers(self, key: str) -> Set[str]:
+        """Get all members of a set."""
+        return await self.redis.smembers(key)
+
+    async def sismember(self, key: str, member: str) -> bool:
+        """Check if member is in set."""
+        return await self.redis.sismember(key, member)
+
+    async def scard(self, key: str) -> int:
+        """Get the number of members in a set."""
+        return await self.redis.scard(key)
+
+    # --- String/JSON Operations (for caches) ---
+
+    async def set(
+        self,
+        key: str,
+        value: Any,
+        ex: Optional[int] = None,
+    ) -> None:
+        """Set a key to a value with optional expiration."""
+        serialized = json.dumps(value) if not isinstance(value, str) else value
+        await self.redis.set(key, serialized, ex=ex)
+
+    async def get(self, key: str) -> Optional[Any]:
+        """Get a key value."""
+        value = await self.redis.get(key)
+        if value is None:
+            return None
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+
+    async def delete(self, *keys: str) -> int:
+        """Delete one or more keys."""
+        return await self.redis.delete(*keys)
+
+    async def exists(self, key: str) -> bool:
+        """Check if a key exists."""
+        return await self.redis.exists(key) > 0
+
+    async def ttl(self, key: str) -> int:
+        """Get time-to-live for a key in seconds."""
+        return await self.redis.ttl(key)
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        """Set expiration on a key."""
+        return await self.redis.expire(key, seconds)
+
+    # --- Sorted Set Operations (for leaderboards) ---
