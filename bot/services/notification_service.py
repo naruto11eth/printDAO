@@ -190,3 +190,76 @@ class NotificationService:
             if await self.send_message(chat_id, text, topic_name):
                 success_count += 1
         return success_count
+
+    def _format_whale_alert(self, alert: WhaleAlert) -> str:
+        """Format a whale alert as HTML message."""
+        short_addr = shorten_address(alert.wallet)
+        value_str = format_usd(alert.trade_value)
+
+        if alert.alert_type == "new_whale_discovered":
+            emoji = "🐋"
+            title = "NEW WHALE DISCOVERED"
+        else:
+            emoji = "🚨"
+            title = "WHALE ALERT"
+
+        lines = [
+            f"<b>{emoji} {title}</b>",
+            "",
+            f"Wallet: <code>{short_addr}</code>",
+            f"Exchange: {alert.exchange.upper()}",
+        ]
+
+        if alert.market_title:
+            lines.append(f"Market: {alert.market_title}")
+
+        if alert.side:
+            lines.append(f"Side: <b>{alert.side}</b>")
+
+        if alert.asset:
+            lines.append(f"Asset: {alert.asset}")
+
+        lines.append(f"Value: <b>{value_str}</b>")
+
+        if alert.price:
+            lines.append(f"Price: ${alert.price:,.4f}")
+
+        if alert.size:
+            lines.append(f"Size: {alert.size:,.4f}")
+
+        return "\n".join(lines)
+
+    def _format_copy_signal(self, signal: CopyTradeSignal) -> str:
+        """Format a copy trading signal as HTML message."""
+        wallet_display = signal.source_label or shorten_address(signal.source_wallet)
+        notional_str = format_usd(signal.notional_usd)
+
+        lines = [
+            "<b>🔔 COPY TRADE SIGNAL</b>",
+            "",
+            f"Trader: <code>{wallet_display}</code>",
+            f"Exchange: {signal.exchange.upper()}",
+            "",
+        ]
+
+        if signal.market_title:
+            lines.append(f"📊 Market: {signal.market_title}")
+
+        lines.extend([
+            f"Action: <b>{signal.action}</b>",
+            f"Size: {signal.amount:,.4f} @ ${signal.price:,.4f}",
+            f"Notional: {notional_str}",
+        ])
+
+        if signal.leverage:
+            lines.append(f"Leverage: {signal.leverage}x")
+
+        if signal.outcome:
+            lines.append(f"Outcome: {signal.outcome}")
+
+        lines.extend([
+            "",
+            "<i>⚠️ Not financial advice. DYOR.</i>",
+        ])
+
+        return "\n".join(lines)
