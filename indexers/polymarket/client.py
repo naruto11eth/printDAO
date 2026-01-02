@@ -271,3 +271,94 @@ class PolymarketClient:
             return None
 
         return PortfolioValue.from_api(data)
+
+    async def get_trades(
+        self,
+        address: Optional[str] = None,
+        market: Optional[str] = None,
+        min_size: Optional[float] = None,
+        side: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Trade]:
+        """Get trades for a wallet or market.
+
+        Args:
+            address: Optional wallet address
+            market: Optional condition ID
+            min_size: Minimum trade size in USDC
+            side: BUY or SELL
+            limit: Results per page
+            offset: Pagination offset
+
+        Returns:
+            List of Trade objects
+        """
+        params = {
+            "limit": min(limit, 500),
+            "offset": offset,
+        }
+
+        if address:
+            params["user"] = address
+        if market:
+            params["market"] = market
+        if min_size:
+            params["filterType"] = "CASH"
+            params["filterAmount"] = min_size
+        if side:
+            params["side"] = side
+
+        url = f"{self.BASE_URL}/trades"
+        data = await self._request("GET", url, params)
+
+        if not isinstance(data, list):
+            return []
+
+        return [Trade.from_api(item) for item in data]
+
+    async def get_whale_trades(
+        self,
+        min_size: float = 10000.0,
+        limit: int = 50,
+    ) -> list[Trade]:
+        """Get recent whale trades (large trades).
+
+        Args:
+            min_size: Minimum trade size in USDC
+            limit: Max trades to return
+
+        Returns:
+            List of whale trades
+        """
+        return await self.get_trades(
+            min_size=min_size,
+            limit=limit,
+        )
+
+    async def get_market_holders(
+        self,
+        condition_id: str,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Get top holders for a market.
+
+        Args:
+            condition_id: Market condition ID
+            limit: Max holders to return
+
+        Returns:
+            List of holder data
+        """
+        params = {
+            "market": condition_id,
+            "limit": limit,
+        }
+
+        url = f"{self.BASE_URL}/holders"
+        data = await self._request("GET", url, params)
+
+        if not isinstance(data, list):
+            return []
+
+        return data
