@@ -216,3 +216,172 @@ class WalletService:
         return await self.redis.hexists(self._user_wallets_key(user_id), address)
 
     # --- Wallet Groups ---
+
+    async def create_group(
+        self,
+        user_id: int,
+        name: str,
+        description: Optional[str] = None,
+    ) -> ServiceResult:
+        """Create a wallet group.
+
+        Args:
+            user_id: Telegram user ID
+            name: Group name
+            description: Optional description
+
+        Returns:
+            ServiceResult with created group
+        """
+        user_key = self._user_groups_key(user_id)
+
+        # Check group limit
+        current_count = await self.redis.hlen(user_key)
+        if current_count >= MAX_GROUPS_PER_USER:
+            return ServiceResult.fail(
+                f"Maximum group limit reached ({MAX_GROUPS_PER_USER})."
+            )
+
+        # Check for duplicate name
+        existing_groups = await self.redis.hgetall(user_key)
+        for data in existing_groups.values():
+            group = WalletGroup.from_dict(data)
+            if group.name.lower() == name.lower():
+                return ServiceResult.fail(
+                    f"A group named '{name}' already exists."
+                )
+
+        # Create group
+        group = WalletGroup(name=name, description=description)
+        await self.redis.hset(user_key, group.id, group.to_dict())
+
+        logger.info(f"User {user_id} created group '{name}' (id={group.id})")
+        return ServiceResult.ok(group)
+
+    async def get_groups(self, user_id: int) -> List[WalletGroup]:
+        """Get all groups for a user.
+
+        Args:
+            user_id: Telegram user ID
+
+        Returns:
+            List of WalletGroup objects
+        """
+        user_key = self._user_groups_key(user_id)
+        all_data = await self.redis.hgetall(user_key)
+
+        groups = []
+        for data in all_data.values():
+            groups.append(WalletGroup.from_dict(data))
+
+        # Sort by created_at
+        groups.sort(key=lambda g: g.created_at)
+        return groups
+
+    async def get_group(self, user_id: int, group_id: str) -> Optional[WalletGroup]:
+        """Get a specific group.
+
+        Args:
+            user_id: Telegram user ID
+            group_id: Group ID
+
+        Returns:
+            WalletGroup or None
+        """
+        user_key = self._user_groups_key(user_id)
+        data = await self.redis.hget(user_key, group_id)
+        if data:
+            return WalletGroup.from_dict(data)
+        return None
+
+    async def get_group_by_name(self, user_id: int, name: str) -> Optional[WalletGroup]:
+        """Get a group by name.
+
+        Args:
+            user_id: Telegram user ID
+            name: Group name
+
+        Returns:
+            WalletGroup or None
+        """
+        groups = await self.get_groups(user_id)
+        for group in groups:
+            if group.name.lower() == name.lower():
+                return group
+        return None
+
+    async def add_wallet_to_group(
+        self,
+        user_id: int,
+        group_identifier: str,
+        address: str,
+    ) -> ServiceResult:
+        """Add a wallet to a group.
+
+        Args:
+            user_id: Telegram user ID
+            group_identifier: Group ID or name
+            address: Wallet address
+
+        Returns:
+            ServiceResult
+        """
+        # Find group by ID or name
+        group = await self.get_group(user_id, group_identifier)
+        if not group:
+            group = await self.get_group_by_name(user_id, group_identifier)
+        if not group:
+            return ServiceResult.fail(f"Group not found: {group_identifier}")
+
+        # Check if wallet is tracked
+        address = normalize_address(address)
+        wallet_data = await self.redis.hget(self._user_wallets_key(user_id), address)
+        if not wallet_data:
+            return ServiceResult.fail(
+                f"You're not tracking this wallet. Use /track first."
+            )
+
+        # Update wallet with group_id
+        wallet = TrackedWallet.from_dict(wallet_data)
+        wallet.group_id = group.id
+        await self.redis.hset(self._user_wallets_key(user_id), address, wallet.to_dict())
+
+        # Add to group's wallet list
+        if address not in group.wallet_addresses:
+            group.wallet_addresses.append(address)
+            await self.redis.hset(self._user_groups_key(user_id), group.id, group.to_dict())
+
+        return ServiceResult.ok(group)
+
+    async def delete_group(self, user_id: int, group_identifier: str) -> ServiceResult:
+        """Delete a wallet group.
+
+        Args:
+            user_id: Telegram user ID
+            group_identifier: Group ID or name
+
+        Returns:
+            ServiceResult
+        """
+        # Find group
+        group = await self.get_group(user_id, group_identifier)
+        if not group:
+            group = await self.get_group_by_name(user_id, group_identifier)
+        if not group:
+            return ServiceResult.fail(f"Group not found: {group_identifier}")
+
+        # Remove group_id from all wallets in the group
+        for address in group.wallet_addresses:
+            wallet_data = await self.redis.hget(self._user_wallets_key(user_id), address)
+            if wallet_data:
+                wallet = TrackedWallet.from_dict(wallet_data)
+                wallet.group_id = None
+                await self.redis.hset(
+                    self._user_wallets_key(user_id), address, wallet.to_dict()
+                )
+
+        # Delete group
+        await self.redis.hdel(self._user_groups_key(user_id), group.id)
+
+        logger.info(f"User {user_id} deleted group '{group.name}'")
+        return ServiceResult.ok(group)
