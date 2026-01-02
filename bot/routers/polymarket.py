@@ -173,3 +173,185 @@ async def cmd_pm_pnl(
 
 
 @router.message(Command("pm_trades"))
+async def cmd_pm_trades(
+    message: Message,
+    command: CommandObject,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+) -> None:
+    """Show recent trades for a Polymarket address.
+
+    Usage: /pm_trades <address> [hours]
+    """
+    if not command.args:
+        await message.reply(
+            "<b>Usage:</b> /pm_trades &lt;address&gt; [hours]\n\n"
+            "<b>Example:</b>\n"
+            "<code>/pm_trades 0x742d... 24</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    parts = command.args.strip().split()
+    address = parts[0]
+    hours = int(parts[1]) if len(parts) > 1 else 24
+
+    if not is_valid_ethereum_address(address):
+        await message.reply("Invalid Ethereum address.")
+        return
+
+    if not polymarket_indexer:
+        await message.reply("Polymarket indexer is not available.")
+        return
+
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    try:
+        trades = await polymarket_indexer.get_recent_trades(address, hours)
+
+        if not trades:
+            await message.reply(
+                f"No trades in the last {hours} hours for <code>{shorten_address(address)}</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        lines = [
+            f"<b>Recent Trades ({hours}h)</b>",
+            f"<code>{shorten_address(address)}</code>\n",
+        ]
+
+        for trade in trades[:10]:
+            side_emoji = "🟢" if trade.side and trade.side.value == "BUY" else "🔴"
+            time_str = trade.datetime.strftime("%m/%d %H:%M")
+
+            lines.append(
+                f"{side_emoji} <b>{trade.title[:35]}{'...' if len(trade.title) > 35 else ''}</b>\n"
+                f"   {trade.outcome} | ${trade.usdc_size:,.0f} @ {trade.price:.1f}%\n"
+                f"   {time_str}"
+            )
+
+        if len(trades) > 10:
+            lines.append(f"\n<i>... and {len(trades) - 10} more trades</i>")
+
+        await message.reply("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error getting trades for {address}: {e}")
+        await message.reply(f"Error fetching trades: {str(e)}")
+
+
+@router.message(Command("pm_whales"))
+async def cmd_pm_whales(
+    message: Message,
+    command: CommandObject,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+) -> None:
+    """Show recent whale trades on Polymarket.
+
+    Usage: /pm_whales [min_size]
+    Default min_size: $10,000
+    """
+    min_size = 10000.0
+
+    if command.args:
+        try:
+            min_size = float(command.args.strip().replace("$", "").replace(",", ""))
+        except ValueError:
+            await message.reply("Invalid amount. Use a number like 10000 or $10,000")
+            return
+
+    if not polymarket_indexer:
+        await message.reply("Polymarket indexer is not available.")
+        return
+
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    try:
+        trades = await polymarket_indexer.tracker.get_recent_whale_trades(
+            min_size=min_size,
+            limit=10,
+        )
+
+        if not trades:
+            await message.reply(
+                f"No whale trades found above ${min_size:,.0f}",
+                parse_mode="HTML",
+            )
+            return
+
+        lines = [
+            f"<b>🐋 Polymarket Whale Trades</b>",
+            f"<i>Trades above ${min_size:,.0f}</i>\n",
+        ]
+
+        for trade in trades:
+            side_emoji = "🟢" if trade.side.value == "BUY" else "🔴"
+            trader = trade.pseudonym or trade.name or shorten_address(trade.proxy_wallet)
+            time_str = trade.datetime.strftime("%m/%d %H:%M")
+
+            lines.append(
+                f"{side_emoji} <b>${trade.usdc_size:,.0f}</b> by {trader}\n"
+                f"   {trade.title[:40]}{'...' if len(trade.title) > 40 else ''}\n"
+                f"   {trade.outcome} @ {trade.price:.1f}% | {time_str}"
+            )
+
+        await message.reply("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error getting whale trades: {e}")
+        await message.reply(f"Error fetching whale trades: {str(e)}")
+
+
+@router.message(Command("pm_subscribe"))
+async def cmd_pm_subscribe(
+    message: Message,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+) -> None:
+    """Subscribe to Polymarket whale alerts."""
+    if not polymarket_indexer:
+        await message.reply("Polymarket indexer is not available.")
+        return
+
+    try:
+        is_new = await polymarket_indexer.subscribe_to_whales(message.chat.id)
+
+        if is_new:
+            await message.reply(
+                "🐋 <b>Subscribed to Polymarket whale alerts!</b>\n\n"
+                "You'll receive alerts for trades above $10,000.\n"
+                "Use /pm_unsubscribe to stop.",
+                parse_mode="HTML",
+            )
+        else:
+            await message.reply("You're already subscribed to whale alerts.")
+
+    except Exception as e:
+        logger.error(f"Error subscribing to whales: {e}")
+        await message.reply(f"Error: {str(e)}")
+
+
+@router.message(Command("pm_unsubscribe"))
+async def cmd_pm_unsubscribe(
+    message: Message,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+) -> None:
+    """Unsubscribe from Polymarket whale alerts."""
+    if not polymarket_indexer:
+        await message.reply("Polymarket indexer is not available.")
+        return
+
+    try:
+        was_subscribed = await polymarket_indexer.unsubscribe_from_whales(message.chat.id)
+
+        if was_subscribed:
+            await message.reply(
+                "✅ Unsubscribed from Polymarket whale alerts.\n"
+                "Use /pm_subscribe to re-subscribe.",
+                parse_mode="HTML",
+            )
+        else:
+            await message.reply("You weren't subscribed to whale alerts.")
+
+    except Exception as e:
+        logger.error(f"Error unsubscribing from whales: {e}")
+        await message.reply(f"Error: {str(e)}")
