@@ -86,3 +86,107 @@ class NotificationService:
         except Exception as e:
             logger.error(f"Failed to send message to chat {chat_id}: {e}")
             return False
+
+    async def send_whale_alert(
+        self,
+        chat_id: int,
+        alert: WhaleAlert,
+        include_copy_buttons: bool = True,
+    ) -> bool:
+        """Send a whale alert notification.
+
+        Args:
+            chat_id: Telegram chat ID
+            alert: WhaleAlert object
+            include_copy_buttons: Whether to include copy address buttons
+
+        Returns:
+            True if sent successfully
+        """
+        # Determine which topic to use
+        topic_name = alert.exchange  # "hyperliquid" or "polymarket"
+
+        # Format the alert message
+        text = self._format_whale_alert(alert)
+
+        # Create inline keyboard with copy buttons
+        reply_markup = None
+        if include_copy_buttons:
+            buttons = [
+                [
+                    InlineKeyboardButton(
+                        text="Copy Address",
+                        callback_data=f"copy:{alert.wallet}",
+                    )
+                ]
+            ]
+            # Add track button
+            buttons.append([
+                InlineKeyboardButton(
+                    text="Track Wallet",
+                    callback_data=f"track:{alert.wallet}:{alert.exchange}",
+                )
+            ])
+            reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+        return await self.send_message(
+            chat_id=chat_id,
+            text=text,
+            topic_name=topic_name,
+            reply_markup=reply_markup,
+        )
+
+    async def send_copy_signal(
+        self,
+        chat_id: int,
+        signal: CopyTradeSignal,
+    ) -> bool:
+        """Send a copy trading signal notification.
+
+        Args:
+            chat_id: Telegram chat ID
+            signal: CopyTradeSignal object
+
+        Returns:
+            True if sent successfully
+        """
+        text = self._format_copy_signal(signal)
+
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    text="View Position",
+                    callback_data=f"position:{signal.source_wallet}:{signal.exchange}",
+                ),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+        return await self.send_message(
+            chat_id=chat_id,
+            text=text,
+            topic_name="copy_trading",
+            reply_markup=reply_markup,
+        )
+
+    async def broadcast_to_subscribers(
+        self,
+        subscriber_ids: List[int],
+        text: str,
+        topic_name: Optional[str] = None,
+    ) -> int:
+        """Broadcast a message to multiple subscribers.
+
+        Args:
+            subscriber_ids: List of chat IDs to send to
+            text: Message text
+            topic_name: Optional topic name
+
+        Returns:
+            Number of successful sends
+        """
+        success_count = 0
+        for chat_id in subscriber_ids:
+            if await self.send_message(chat_id, text, topic_name):
+                success_count += 1
+        return success_count
