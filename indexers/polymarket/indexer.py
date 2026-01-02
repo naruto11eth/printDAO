@@ -254,3 +254,47 @@ class PolymarketIndexer:
                 )
             except Exception as e:
                 logger.error(f"Error sending whale alert to {chat_id}: {e}")
+
+    async def subscribe_to_whales(self, chat_id: int) -> bool:
+        """Subscribe a chat to whale alerts.
+
+        Args:
+            chat_id: Telegram chat ID
+
+        Returns:
+            True if newly subscribed, False if already subscribed
+        """
+        key = "pm:whale_subscribers"
+        result = await self.redis.redis.sadd(key, str(chat_id))
+        return result > 0
+
+    async def unsubscribe_from_whales(self, chat_id: int) -> bool:
+        """Unsubscribe a chat from whale alerts.
+
+        Args:
+            chat_id: Telegram chat ID
+
+        Returns:
+            True if unsubscribed, False if wasn't subscribed
+        """
+        key = "pm:whale_subscribers"
+        result = await self.redis.redis.srem(key, str(chat_id))
+        return result > 0
+
+    # --- Query methods for bot commands ---
+
+    async def get_positions(self, address: str) -> list[Position]:
+        """Get positions for a wallet address."""
+        return await self.tracker.get_wallet_positions(address)
+
+    async def get_pnl(self, address: str, period: str = "all"):
+        """Get PnL summary for a wallet."""
+        return await self.tracker.get_wallet_pnl(address, period)
+
+    async def get_position_summary(self, address: str) -> dict:
+        """Get position summary for a wallet."""
+        return await self.tracker.get_position_summary(address)
+
+    async def get_recent_trades(self, address: str, hours: int = 24):
+        """Get recent trades for a wallet."""
+        return await self.client.get_recent_trades(address, hours)
