@@ -149,3 +149,41 @@ class RedisClient:
         return await self.redis.expire(key, seconds)
 
     # --- Sorted Set Operations (for leaderboards) ---
+
+    async def zadd(
+        self,
+        key: str,
+        mapping: Dict[str, float],
+        nx: bool = False,
+        xx: bool = False,
+    ) -> int:
+        """Add members to a sorted set with scores."""
+        return await self.redis.zadd(key, mapping, nx=nx, xx=xx)
+
+    async def zrange(
+        self,
+        key: str,
+        start: int,
+        stop: int,
+        withscores: bool = False,
+        desc: bool = False,
+    ) -> List:
+        """Get range of members from sorted set."""
+        if desc:
+            return await self.redis.zrevrange(key, start, stop, withscores=withscores)
+        return await self.redis.zrange(key, start, stop, withscores=withscores)
+
+    async def zscore(self, key: str, member: str) -> Optional[float]:
+        """Get score of member in sorted set."""
+        return await self.redis.zscore(key, member)
+
+    # --- Pub/Sub (for real-time alerts) ---
+
+    async def publish(self, channel: str, message: Any) -> int:
+        """Publish a message to a channel."""
+        serialized = json.dumps(message) if not isinstance(message, str) else message
+        return await self.redis.publish(channel, serialized)
+
+    def pubsub(self):
+        """Get a pubsub instance for subscribing."""
+        return self.redis.pubsub()
