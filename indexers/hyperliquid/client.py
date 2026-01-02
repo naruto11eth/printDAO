@@ -195,3 +195,118 @@ class HyperliquidClient:
             return fills[:limit]
 
         return await asyncio.to_thread(self._retry_request, _fetch)
+
+    async def get_asset_contexts(self) -> dict[str, AssetContext]:
+        """Get market context for all assets.
+
+        Returns:
+            Dict mapping coin to AssetContext
+        """
+        def _fetch():
+            info = self._get_info()
+            raw = info.meta_and_asset_ctxs()
+            meta = raw[0]
+            ctxs = raw[1]
+
+            result = {}
+            for i, asset in enumerate(meta.get("universe", [])):
+                coin = asset["name"]
+                if i < len(ctxs):
+                    result[coin] = AssetContext.from_raw(coin, ctxs[i])
+
+            return result
+
+        return await asyncio.to_thread(self._retry_request, _fetch)
+
+    async def get_whale_trades(
+        self,
+        coins: Optional[List[str]] = None,
+        threshold: Decimal = Decimal("10000000"),
+        limit: int = 50,
+    ) -> List[Trade]:
+        """Get recent whale trades.
+
+        Args:
+            coins: Coins to check (defaults to top coins)
+            threshold: Min notional value for whale trades
+            limit: Max trades to return
+
+        Returns:
+            List of whale Trade objects
+        """
+        if coins is None:
+            # Default to most active coins
+            coins = ["BTC", "ETH", "SOL", "DOGE", "WIF", "PEPE", "ARB", "SUI", "AVAX", "LINK"]
+
+        all_trades = []
+
+        for coin in coins:
+            try:
+                trades = await self.get_recent_trades(coin, limit=100)
+                whale_trades = [t for t in trades if t.notional_usd >= threshold]
+                all_trades.extend(whale_trades)
+            except Exception as e:
+                logger.warning(f"Failed to fetch trades for {coin}: {e}")
+
+        # Sort by time and limit
+        all_trades.sort(key=lambda t: t.time_ms, reverse=True)
+        return all_trades[:limit]
+
+    def get_cached_whales(self, threshold: Decimal = Decimal("10000000"), limit: int = 50) -> List[Trade]:
+        """Get cached whale trades.
+
+        Args:
+            threshold: Min notional value
+            limit: Max trades to return
+
+        Returns:
+            List of cached whale trades
+        """
+        return self._trade_cache.whales(threshold, limit)
+
+    def get_cached_trades(self, coin: Optional[str] = None, limit: int = 100) -> List[Trade]:
+        """Get cached trades.
+
+        Args:
+            coin: Optional coin filter
+            limit: Max trades to return
+
+        Returns:
+            List of cached trades
+        """
+        if coin:
+            return self._trade_cache.recent(coin, limit)
+        return self._trade_cache.all_recent(limit)
+
+    async def compute_sentiment(
+        self,
+        coin: str,
+        lookback_hours: float = 12,
+    ) -> SentimentSummary:
+        """Compute market sentiment for a coin.
+
+        Args:
+            coin: Coin symbol
+            lookback_hours: Hours to look back
+
+        Returns:
+            SentimentSummary object
+        """
+        trades = await self.get_recent_trades(coin, limit=500)
+
+        # Filter by time
+        cutoff = datetime.now() - timedelta(hours=lookback_hours)
+        recent_trades = [t for t in trades if t.datetime >= cutoff]
+
+        longs = [t for t in recent_trades if t.direction == Direction.LONG]
+        shorts = [t for t in recent_trades if t.direction == Direction.SHORT]
+
+        return SentimentSummary(
+            coin=coin,
+            period_hours=lookback_hours,
+            total_trades=len(recent_trades),
+            long_count=len(longs),
+            short_count=len(shorts),
+            long_volume=sum((t.notional_usd for t in longs), Decimal("0")),
+            short_volume=sum((t.notional_usd for t in shorts), Decimal("0")),
+        )
