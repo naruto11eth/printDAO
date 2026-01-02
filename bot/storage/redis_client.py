@@ -49,3 +49,43 @@ class RedisClient:
         return self._redis
 
     # --- Hash Operations (for user wallets, groups) ---
+
+    async def hset(self, key: str, field: str, value: Any) -> None:
+        """Set a hash field to a value (JSON serialized)."""
+        serialized = json.dumps(value) if not isinstance(value, str) else value
+        await self.redis.hset(key, field, serialized)
+
+    async def hget(self, key: str, field: str) -> Optional[Any]:
+        """Get a hash field value (JSON deserialized)."""
+        value = await self.redis.hget(key, field)
+        if value is None:
+            return None
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+
+    async def hgetall(self, key: str) -> Dict[str, Any]:
+        """Get all fields and values in a hash."""
+        data = await self.redis.hgetall(key)
+        result = {}
+        for field, value in data.items():
+            try:
+                result[field] = json.loads(value)
+            except json.JSONDecodeError:
+                result[field] = value
+        return result
+
+    async def hdel(self, key: str, *fields: str) -> int:
+        """Delete one or more hash fields."""
+        return await self.redis.hdel(key, *fields)
+
+    async def hlen(self, key: str) -> int:
+        """Get the number of fields in a hash."""
+        return await self.redis.hlen(key)
+
+    async def hexists(self, key: str, field: str) -> bool:
+        """Check if a hash field exists."""
+        return await self.redis.hexists(key, field)
+
+    # --- Set Operations (for wallet subscribers) ---
