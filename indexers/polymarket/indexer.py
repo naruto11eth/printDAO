@@ -167,7 +167,7 @@ class PolymarketIndexer:
         )
 
         if trade.price:
-            message += f"<b>Price:</b> {trade.price:.2f}%\n"
+            message += f"<b>Price:</b> {trade.price*100:.1f}%\n"
 
         message += (
             f"\n<a href=\"https://polymarket.com/event/{trade.event_slug}\">View Market</a> | "
@@ -240,7 +240,7 @@ class PolymarketIndexer:
             f"<b>Market:</b> {trade.title}\n"
             f"<b>Position:</b> {trade.outcome}\n"
             f"<b>Size:</b> <b>${trade.usdc_size:,.0f}</b>\n"
-            f"<b>Price:</b> {trade.price:.1f}%\n\n"
+            f"<b>Price:</b> {trade.price*100:.1f}%\n\n"
             f"<a href=\"https://polymarket.com/event/{trade.event_slug}\">View Market</a>"
         )
 
