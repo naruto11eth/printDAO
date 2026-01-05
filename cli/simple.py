@@ -3,9 +3,17 @@
 
 import asyncio
 import sys
+import os
+import tty
+import termios
+import select
 from datetime import datetime
 from decimal import Decimal
+from threading import Thread
 from typing import Optional
+
+# Add project root to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from rich.console import Console
 from rich.live import Live
@@ -21,6 +29,48 @@ from indexers.hyperliquid import Trade as HLTrade
 
 
 console = Console()
+
+
+# ============== Keyboard Handler ==============
+
+class KeyboardHandler:
+    """Non-blocking keyboard input handler for Unix systems."""
+
+    def __init__(self, callback):
+        self.callback = callback
+        self.running = False
+        self._thread: Optional[Thread] = None
+        self._old_settings = None
+
+    def start(self) -> None:
+        """Start listening for keyboard input."""
+        self.running = True
+        self._thread = Thread(target=self._listen, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop listening for keyboard input."""
+        self.running = False
+        if self._thread:
+            self._thread.join(timeout=0.5)
+
+    def _listen(self) -> None:
+        """Listen for keyboard input in a separate thread."""
+        fd = sys.stdin.fileno()
+        self._old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)  # Use cbreak for Ctrl+C to still work
+            while self.running:
+                if select.select([sys.stdin], [], [], 0.1)[0]:
+                    key = sys.stdin.read(1).lower()
+                    self.callback(key)
+        except Exception:
+            pass  # Silently handle any terminal errors
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, self._old_settings)
+            except Exception:
+                pass
 
 
 # ============== Polymarket Tables ==============
@@ -138,6 +188,47 @@ def create_hl_whales_table(whales: list[HLTrade]) -> Table:
 
 # ============== Layout Builders ==============
 
+def create_header_text(current_exchange: str, stats: dict) -> Text:
+    """Create header text with tab indicators."""
+    header_text = Text()
+    header_text.append("PRINTDAO", style="bold magenta")
+    header_text.append(" | ", style="dim")
+
+    # Tab indicators
+    tabs = [
+        ("P", "polymarket", "green"),
+        ("H", "hyperliquid", "blue"),
+        ("N", "nado", "cyan"),
+        ("L", "lighter", "yellow"),
+        ("A", "all", "magenta"),
+    ]
+
+    for i, (key, name, color) in enumerate(tabs):
+        if i > 0:
+            header_text.append(" ", style="dim")
+
+        if current_exchange == name:
+            header_text.append(f"[{key}] {name.upper()}", style=f"bold {color}")
+        else:
+            header_text.append(f"[{key}]", style="dim")
+
+    header_text.append(" | ", style="dim")
+    header_text.append(f"Trades: {stats.get('total_trades', 0)}", style="cyan")
+    header_text.append(f" | Vol: ${stats.get('total_volume', 0):,.0f}", style="green")
+    header_text.append(f" | Whales: {stats.get('whale_count', 0)}", style="yellow")
+    header_text.append(f" | {stats.get('last_update', 'N/A')}", style="dim")
+
+    return header_text
+
+
+def create_footer_text() -> Text:
+    """Create footer with keyboard shortcuts."""
+    return Text(
+        "[P] Polymarket | [H] Hyperliquid | [N] Nado | [L] Lighter | [A] All | [Q] Quit",
+        style="dim"
+    )
+
+
 def create_polymarket_layout(trades: list, whales: list, stats: dict) -> Layout:
     """Create Polymarket layout."""
     layout = Layout()
@@ -153,27 +244,10 @@ def create_polymarket_layout(trades: list, whales: list, stats: dict) -> Layout:
         Layout(name="whales", ratio=1),
     )
 
-    # Header
-    header_text = Text()
-    header_text.append("PRINTDAO", style="bold magenta")
-    header_text.append(" | ", style="dim")
-    header_text.append("[P] POLYMARKET", style="bold green")
-    header_text.append(" | [H] Hyperliquid", style="dim")
-    header_text.append(" | ", style="dim")
-    header_text.append(f"Trades: {stats.get('total_trades', 0)}", style="cyan")
-    header_text.append(f" | Vol: ${stats.get('total_volume', 0):,.0f}", style="green")
-    header_text.append(f" | Whales: {stats.get('whale_count', 0)}", style="yellow")
-    header_text.append(f" | {stats.get('last_update', 'N/A')}", style="dim")
-
-    layout["header"].update(Panel(header_text, style="bold"))
-
-    # Main content
+    layout["header"].update(Panel(create_header_text("polymarket", stats), style="bold"))
     layout["trades"].update(Panel(create_pm_trades_table(trades), border_style="green"))
     layout["whales"].update(Panel(create_pm_whales_table(whales), border_style="yellow"))
-
-    # Footer
-    footer_text = Text("Press Ctrl+C to exit | [P] Polymarket | [H] Hyperliquid", style="dim")
-    layout["footer"].update(Panel(footer_text))
+    layout["footer"].update(Panel(create_footer_text()))
 
     return layout
 
@@ -193,28 +267,80 @@ def create_hyperliquid_layout(trades: list, whales: list, stats: dict) -> Layout
         Layout(name="whales", ratio=1),
     )
 
-    # Header
-    header_text = Text()
-    header_text.append("PRINTDAO", style="bold magenta")
-    header_text.append(" | ", style="dim")
-    header_text.append("[P] Polymarket", style="dim")
-    header_text.append(" | ", style="dim")
-    header_text.append("[H] HYPERLIQUID", style="bold blue")
-    header_text.append(" | ", style="dim")
-    header_text.append(f"Trades: {stats.get('total_trades', 0)}", style="cyan")
-    header_text.append(f" | Vol: ${stats.get('total_volume', 0):,.0f}", style="green")
-    header_text.append(f" | Whales: {stats.get('whale_count', 0)}", style="yellow")
-    header_text.append(f" | {stats.get('last_update', 'N/A')}", style="dim")
-
-    layout["header"].update(Panel(header_text, style="bold"))
-
-    # Main content
+    layout["header"].update(Panel(create_header_text("hyperliquid", stats), style="bold"))
     layout["trades"].update(Panel(create_hl_trades_table(trades), border_style="blue"))
     layout["whales"].update(Panel(create_hl_whales_table(whales), border_style="yellow"))
+    layout["footer"].update(Panel(create_footer_text()))
 
-    # Footer
-    footer_text = Text("Press Ctrl+C to exit | [P] Polymarket | [H] Hyperliquid", style="dim")
-    layout["footer"].update(Panel(footer_text))
+    return layout
+
+
+def create_coming_soon_layout(exchange_name: str, stats: dict) -> Layout:
+    """Create coming soon placeholder layout."""
+    layout = Layout()
+
+    layout.split_column(
+        Layout(name="header", size=3),
+        Layout(name="main"),
+        Layout(name="footer", size=3),
+    )
+
+    # Coming soon message
+    coming_soon = Text()
+    coming_soon.append(f"\n\n{exchange_name.upper()}\n", style="bold cyan")
+    coming_soon.append("Coming Soon\n\n", style="bold yellow")
+    coming_soon.append("This exchange integration is under development.\n", style="dim")
+    coming_soon.append("Check back soon for updates!", style="dim")
+
+    layout["header"].update(Panel(create_header_text(exchange_name, stats), style="bold"))
+    layout["main"].update(Panel(coming_soon, title=f"{exchange_name.title()} Integration"))
+    layout["footer"].update(Panel(create_footer_text()))
+
+    return layout
+
+
+def create_all_exchanges_layout(
+    pm_trades: list, pm_whales: list, pm_stats: dict,
+    hl_trades: list, hl_whales: list, hl_stats: dict
+) -> Layout:
+    """Create layout showing all exchanges."""
+    layout = Layout()
+
+    layout.split_column(
+        Layout(name="header", size=3),
+        Layout(name="main"),
+        Layout(name="footer", size=3),
+    )
+
+    layout["main"].split_row(
+        Layout(name="polymarket"),
+        Layout(name="hyperliquid"),
+    )
+
+    # Combined stats
+    combined_stats = {
+        "total_trades": pm_stats.get("total_trades", 0) + hl_stats.get("total_trades", 0),
+        "total_volume": pm_stats.get("total_volume", 0) + hl_stats.get("total_volume", 0),
+        "whale_count": pm_stats.get("whale_count", 0) + hl_stats.get("whale_count", 0),
+        "last_update": pm_stats.get("last_update", "N/A"),
+    }
+
+    # Polymarket panel (trades only, condensed)
+    pm_content = Layout()
+    pm_content.split_column(
+        Layout(create_pm_trades_table(pm_trades[:8]), name="trades"),
+    )
+
+    # Hyperliquid panel (trades only, condensed)
+    hl_content = Layout()
+    hl_content.split_column(
+        Layout(create_hl_trades_table(hl_trades[:8]), name="trades"),
+    )
+
+    layout["header"].update(Panel(create_header_text("all", combined_stats), style="bold"))
+    layout["polymarket"].update(Panel(pm_content, title="Polymarket", border_style="green"))
+    layout["hyperliquid"].update(Panel(hl_content, title="Hyperliquid", border_style="blue"))
+    layout["footer"].update(Panel(create_footer_text()))
 
     return layout
 
@@ -222,10 +348,13 @@ def create_hyperliquid_layout(trades: list, whales: list, stats: dict) -> Layout
 # ============== Main App ==============
 
 class PrintDAOCLI:
-    """Main CLI application."""
+    """Main CLI application with keyboard tab switching."""
+
+    EXCHANGES = ["polymarket", "hyperliquid", "nado", "lighter", "all"]
 
     def __init__(self):
-        self.current_exchange = "polymarket"  # or "hyperliquid"
+        self.current_exchange = "all"  # Default to all view
+        self.running = True
 
         # Polymarket data
         self.pm_client = PolymarketClient()
@@ -244,12 +373,40 @@ class PrintDAOCLI:
         # Top coins to monitor on Hyperliquid
         self.hl_coins = ["BTC", "ETH", "SOL", "DOGE", "WIF", "PEPE", "ARB", "SUI", "AVAX", "LINK"]
 
+        # Keyboard handler
+        self.keyboard = KeyboardHandler(self._on_keypress)
+
+    def _on_keypress(self, key: str) -> None:
+        """Handle keyboard input."""
+        key_map = {
+            'p': 'polymarket',
+            'h': 'hyperliquid',
+            'n': 'nado',
+            'l': 'lighter',
+            'a': 'all',
+            'q': None,  # Quit signal
+        }
+
+        if key in key_map:
+            if key_map[key] is None:
+                self.running = False
+            else:
+                self.current_exchange = key_map[key]
+
     def get_current_layout(self) -> Layout:
         """Get layout for current exchange."""
         if self.current_exchange == "polymarket":
             return create_polymarket_layout(self.pm_trades, self.pm_whales, self.pm_stats)
-        else:
+        elif self.current_exchange == "hyperliquid":
             return create_hyperliquid_layout(self.hl_trades, self.hl_whales, self.hl_stats)
+        elif self.current_exchange == "all":
+            return create_all_exchanges_layout(
+                self.pm_trades, self.pm_whales, self.pm_stats,
+                self.hl_trades, self.hl_whales, self.hl_stats
+            )
+        else:
+            # Nado or Lighter - coming soon
+            return create_coming_soon_layout(self.current_exchange, self.pm_stats)
 
     async def fetch_polymarket(self) -> None:
         """Fetch Polymarket data."""
@@ -294,7 +451,7 @@ class PrintDAOCLI:
                             if t.notional_usd >= Decimal("10000000"):
                                 self.hl_whales.insert(0, t)
 
-                except Exception as e:
+                except Exception:
                     pass  # Skip failed coin fetches
 
             # Keep lists bounded
@@ -317,13 +474,16 @@ class PrintDAOCLI:
             self.hl_stats["last_update"] = f"Error: {str(e)[:15]}"
 
     async def run(self) -> None:
-        """Run the CLI application."""
+        """Run the CLI application with keyboard input."""
         console.print("[bold magenta]Starting PrintDAO CLI...[/]")
-        console.print("[dim]Press P for Polymarket, H for Hyperliquid, Ctrl+C to exit[/]\n")
+        console.print("[dim]Use P/H/N/L/A to switch tabs, Q to quit[/]\n")
+
+        # Start keyboard handler
+        self.keyboard.start()
 
         try:
-            with Live(self.get_current_layout(), refresh_per_second=1, console=console) as live:
-                while True:
+            with Live(self.get_current_layout(), refresh_per_second=2, console=console) as live:
+                while self.running:
                     # Fetch data for both exchanges
                     await asyncio.gather(
                         self.fetch_polymarket(),
@@ -333,85 +493,51 @@ class PrintDAOCLI:
                     # Update display
                     live.update(self.get_current_layout())
 
-                    await asyncio.sleep(5)
+                    # Short sleep for responsive keyboard handling
+                    await asyncio.sleep(3)
 
         except KeyboardInterrupt:
-            console.print("\n[bold red]Shutting down...[/]")
+            pass
         finally:
+            self.keyboard.stop()
             await self.pm_client.close()
+            console.print("\n[bold red]Shutting down...[/]")
 
 
-async def main_with_input():
-    """Main with keyboard input handling."""
-    import sys
-    import select
-
-    cli = PrintDAOCLI()
-
-    console.print("[bold magenta]Starting PrintDAO CLI...[/]")
-    console.print("[dim]Press P for Polymarket, H for Hyperliquid, Q to quit[/]\n")
-
-    try:
-        with Live(cli.get_current_layout(), refresh_per_second=1, console=console) as live:
-            while True:
-                # Fetch data
-                await asyncio.gather(
-                    cli.fetch_polymarket(),
-                    cli.fetch_hyperliquid(),
-                )
-
-                # Update display
-                live.update(cli.get_current_layout())
-
-                await asyncio.sleep(5)
-
-    except KeyboardInterrupt:
-        console.print("\n[bold red]Shutting down...[/]")
-    finally:
-        await cli.pm_client.close()
-
-
-def run():
-    """Run the CLI."""
-    # Check for command line argument for exchange
-    if len(sys.argv) > 1:
-        exchange = sys.argv[1].lower()
-        if exchange in ["p", "polymarket", "pm"]:
-            asyncio.run(run_single_exchange("polymarket"))
-        elif exchange in ["h", "hyperliquid", "hl"]:
-            asyncio.run(run_single_exchange("hyperliquid"))
-        else:
-            console.print(f"[red]Unknown exchange: {exchange}[/]")
-            console.print("Usage: python -m cli.simple [polymarket|hyperliquid]")
-            sys.exit(1)
-    else:
-        # Default: run with both exchanges
-        asyncio.run(main_with_input())
-
-
-async def run_single_exchange(exchange: str):
-    """Run CLI for a single exchange."""
+async def run_single_exchange(exchange: str) -> None:
+    """Run CLI for a single exchange (legacy mode)."""
     cli = PrintDAOCLI()
     cli.current_exchange = exchange
 
     console.print(f"[bold magenta]Starting PrintDAO CLI - {exchange.upper()}[/]")
-    console.print("[dim]Press Ctrl+C to exit[/]\n")
+    console.print("[dim]Use P/H/N/L/A to switch tabs, Q to quit[/]\n")
 
-    try:
-        with Live(cli.get_current_layout(), refresh_per_second=1, console=console) as live:
-            while True:
-                if exchange == "polymarket":
-                    await cli.fetch_polymarket()
-                else:
-                    await cli.fetch_hyperliquid()
+    await cli.run()
 
-                live.update(cli.get_current_layout())
-                await asyncio.sleep(5)
 
-    except KeyboardInterrupt:
-        console.print("\n[bold red]Shutting down...[/]")
-    finally:
-        await cli.pm_client.close()
+def run() -> None:
+    """Run the CLI."""
+    # Check for command line argument for exchange
+    if len(sys.argv) > 1:
+        exchange = sys.argv[1].lower()
+        exchange_map = {
+            "p": "polymarket", "polymarket": "polymarket", "pm": "polymarket",
+            "h": "hyperliquid", "hyperliquid": "hyperliquid", "hl": "hyperliquid",
+            "n": "nado", "nado": "nado",
+            "l": "lighter", "lighter": "lighter",
+            "a": "all", "all": "all",
+        }
+
+        if exchange in exchange_map:
+            asyncio.run(run_single_exchange(exchange_map[exchange]))
+        else:
+            console.print(f"[red]Unknown exchange: {exchange}[/]")
+            console.print("Usage: python -m cli.simple [polymarket|hyperliquid|nado|lighter|all]")
+            sys.exit(1)
+    else:
+        # Default: run with all exchanges view
+        cli = PrintDAOCLI()
+        asyncio.run(cli.run())
 
 
 if __name__ == "__main__":
