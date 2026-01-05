@@ -2,7 +2,7 @@
 
 import logging
 from decimal import Decimal
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from aiogram import Router
 from aiogram.types import Message
@@ -11,6 +11,8 @@ from aiogram.filters import Command, CommandObject
 from shared.utils import shorten_address, is_valid_ethereum_address, escape_html
 from indexers.hyperliquid import HyperliquidClient, Direction
 from bot.services.position_indexer import PositionIndexer
+from bot.utils.filters import parse_filter_args, format_filter_summary
+from bot.storage.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
 
@@ -49,16 +51,21 @@ async def cmd_hl_trades(
     command: CommandObject,
     hyperliquid_client: Optional[HyperliquidClient] = None,
 ) -> None:
-    """Show recent trades for a coin.
+    """Show recent trades for a coin with optional size filter.
 
-    Usage: /hl_trades <coin> [limit]
+    Usage: /hl_trades <coin> [filter]
+    Filter examples:
+      /hl_trades BTC          - all BTC trades
+      /hl_trades ETH >100k    - ETH trades above $100k
+      /hl_trades SOL 50k-500k - SOL trades between $50k-$500k
     """
     if not command.args:
         await message.reply(
-            "<b>Usage:</b> /hl_trades &lt;coin&gt; [limit]\n\n"
+            "<b>Usage:</b> /hl_trades &lt;coin&gt; [filter]\n\n"
             "<b>Examples:</b>\n"
             "<code>/hl_trades BTC</code>\n"
-            "<code>/hl_trades ETH 20</code>",
+            "<code>/hl_trades ETH >100k</code>\n"
+            "<code>/hl_trades SOL 50k-500k</code>",
             parse_mode="HTML",
         )
         return
@@ -67,28 +74,43 @@ async def cmd_hl_trades(
         await message.reply("Hyperliquid client is not available.")
         return
 
-    parts = command.args.strip().upper().split()
-    coin = parts[0]
-    limit = min(int(parts[1]), 50) if len(parts) > 1 else 10
+    # Parse coin and optional size filter
+    parts = command.args.strip().split()
+    coin = parts[0].upper()
+    min_size, max_size = None, None
+
+    if len(parts) > 1:
+        filter_str = " ".join(parts[1:])
+        _, min_size, max_size = parse_filter_args(filter_str)
 
     await message.bot.send_chat_action(message.chat.id, "typing")
 
     try:
-        trades = await hyperliquid_client.get_recent_trades(coin, limit)
+        # Fetch more if filtering
+        fetch_limit = 100 if min_size or max_size else 15
+        trades = await hyperliquid_client.get_recent_trades(coin, fetch_limit)
+
+        # Apply size filters
+        if min_size is not None:
+            trades = [t for t in trades if float(t.notional_usd) >= min_size]
+        if max_size is not None:
+            trades = [t for t in trades if float(t.notional_usd) <= max_size]
 
         if not trades:
+            filter_desc = format_filter_summary(coin, min_size, max_size)
             await message.reply(
-                f"No recent trades found for <b>{coin}</b>",
+                f"No trades found matching: {filter_desc}",
                 parse_mode="HTML",
             )
             return
 
+        filter_desc = format_filter_summary(None, min_size, max_size) if min_size or max_size else "all"
         lines = [
             f"<b>Recent {coin} Trades</b>",
-            f"<i>Last {len(trades)} trades</i>\n",
+            f"<i>Filter: {filter_desc} ({len(trades)} trades)</i>\n",
         ]
 
-        for trade in trades[:limit]:
+        for trade in trades[:15]:
             dir_emoji = "🟢" if trade.direction == Direction.LONG else "🔴"
             dir_text = "LONG" if trade.direction == Direction.LONG else "SHORT"
             time_str = trade.datetime.strftime("%H:%M:%S")
@@ -99,6 +121,9 @@ async def cmd_hl_trades(
                 f"   {float(trade.size):,.4f} @ ${float(trade.price):,.2f}\n"
                 f"   {time_str} | <code>{shorten_address(trade.users[0])}</code>"
             )
+
+        if len(trades) > 15:
+            lines.append(f"\n<i>... and {len(trades) - 15} more</i>")
 
         await message.reply("\n".join(lines), parse_mode="HTML")
 
@@ -416,23 +441,35 @@ async def cmd_hl_whales(
     command: CommandObject,
     hyperliquid_client: Optional[HyperliquidClient] = None,
 ) -> None:
-    """Show recent whale trades on Hyperliquid.
+    """Show recent whale trades on Hyperliquid with optional filters.
 
-    Usage: /hl_whales [min_size_millions]
-    Default min_size: $10M
+    Usage: /hl_whales [filter]
+    Filter examples:
+      /hl_whales              - trades above $1M (default)
+      /hl_whales 5m           - trades above $5M
+      /hl_whales >10m         - trades above $10M
+      /hl_whales <5m          - trades below $5M
+      /hl_whales btc          - filter by coin
+      /hl_whales eth >5m      - combine coin and size filter
     """
-    min_size = Decimal("10000000")  # $10M default
+    min_size = 1000000.0  # $1M default
+    max_size = None
+    coin_filter = None
 
     if command.args:
-        try:
-            val = float(command.args.strip().replace("$", "").replace(",", "").replace("M", "").replace("m", ""))
-            # Assume input is in millions if small
-            if val < 1000:
-                val *= 1_000_000
-            min_size = Decimal(str(val))
-        except ValueError:
-            await message.reply("Invalid amount. Use a number like 10 (for $10M) or 5000000")
-            return
+        coin_filter, parsed_min, parsed_max = parse_filter_args(command.args)
+        if parsed_min is not None:
+            min_size = parsed_min
+        if parsed_max is not None:
+            max_size = parsed_max
+        # If coin filter looks like a size (e.g., just "5m"), treat it as size
+        if coin_filter and coin_filter.lower().replace('.', '').replace('m', '').replace('k', '').isdigit():
+            try:
+                parsed = float(coin_filter.lower().replace('m', '')) * 1_000_000 if 'm' in coin_filter.lower() else float(coin_filter.lower().replace('k', '')) * 1000 if 'k' in coin_filter.lower() else float(coin_filter)
+                min_size = parsed
+                coin_filter = None
+            except ValueError:
+                pass
 
     if not hyperliquid_client:
         await message.reply("Hyperliquid client is not available.")
@@ -441,21 +478,33 @@ async def cmd_hl_whales(
     await message.bot.send_chat_action(message.chat.id, "typing")
 
     try:
-        trades = await hyperliquid_client.get_whale_trades(threshold=min_size, limit=10)
+        # Fetch more trades if filtering
+        fetch_limit = 30 if coin_filter or max_size else 15
+        trades = await hyperliquid_client.get_whale_trades(threshold=Decimal(str(min_size)), limit=fetch_limit)
+
+        # Apply additional filters
+        if max_size is not None:
+            trades = [t for t in trades if float(t.notional_usd) <= max_size]
+
+        if coin_filter:
+            coin_upper = coin_filter.upper()
+            trades = [t for t in trades if coin_upper in t.coin.upper()]
 
         if not trades:
+            filter_desc = format_filter_summary(coin_filter, min_size, max_size)
             await message.reply(
-                f"No whale trades found above {format_usd_short(min_size)}",
+                f"No whale trades found matching: {filter_desc}",
                 parse_mode="HTML",
             )
             return
 
+        filter_desc = format_filter_summary(coin_filter, min_size, max_size)
         lines = [
             f"<b>🐋 Hyperliquid Whale Trades</b>",
-            f"<i>Trades above {format_usd_short(min_size)}</i>\n",
+            f"<i>Filter: {filter_desc}</i>\n",
         ]
 
-        for trade in trades:
+        for trade in trades[:15]:
             dir_emoji = "🟢" if trade.direction == Direction.LONG else "🔴"
             dir_text = "LONG" if trade.direction == Direction.LONG else "SHORT"
             time_str = trade.datetime.strftime("%m/%d %H:%M")
@@ -466,6 +515,9 @@ async def cmd_hl_whales(
                 f"   {float(trade.size):,.4f} @ ${float(trade.price):,.2f}\n"
                 f"   {time_str} | <code>{trader}</code>"
             )
+
+        if len(trades) > 15:
+            lines.append(f"\n<i>... and {len(trades) - 15} more</i>")
 
         await message.reply("\n".join(lines), parse_mode="HTML")
 
@@ -569,6 +621,102 @@ async def cmd_hl_coins(
     except Exception as e:
         logger.error(f"Error getting coins: {e}")
         await message.reply(f"Error fetching coins: {str(e)}")
+
+
+@router.message(Command("hl_indexed"))
+async def cmd_hl_indexed(
+    message: Message,
+    command: CommandObject,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Show indexed Hyperliquid trades from Redis with filters.
+
+    Usage: /hl_indexed [filter]
+    Filter examples:
+      /hl_indexed             - all recent trades
+      /hl_indexed btc         - BTC trades only
+      /hl_indexed >500k       - trades above $500k
+      /hl_indexed eth 100k+   - combine coin and size filter
+    """
+    if not redis_client:
+        await message.reply("Redis is not available. Indexer may not be running.")
+        return
+
+    # Parse filters
+    coin_filter, min_size, max_size = None, None, None
+    if command.args:
+        coin_filter, min_size, max_size = parse_filter_args(command.args)
+
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    try:
+        # Get recent trades from Redis
+        tids = await redis_client.zrange("hl:trades", 0, 199, desc=True)
+
+        if not tids:
+            await message.reply("No indexed trades found. Indexer may not be running.")
+            return
+
+        trades = []
+        for tid in tids:
+            trade_data = await redis_client.redis.hgetall(f"hl:trade:{tid}")
+            if trade_data:
+                # Apply filters
+                notional = float(trade_data.get("notional_usd", 0))
+                coin = trade_data.get("coin", "")
+
+                # Coin filter
+                if coin_filter and coin_filter.upper() not in coin.upper():
+                    continue
+
+                # Size filter
+                if min_size is not None and notional < min_size:
+                    continue
+                if max_size is not None and notional > max_size:
+                    continue
+
+                trades.append(trade_data)
+                if len(trades) >= 15:
+                    break
+
+        if not trades:
+            filter_desc = format_filter_summary(coin_filter, min_size, max_size)
+            await message.reply(
+                f"No indexed trades found matching: {filter_desc}",
+                parse_mode="HTML",
+            )
+            return
+
+        filter_desc = format_filter_summary(coin_filter, min_size, max_size)
+        lines = [
+            f"<b>📊 Indexed Hyperliquid Trades</b>",
+            f"<i>Filter: {filter_desc}</i>\n",
+        ]
+
+        for trade in trades:
+            notional = float(trade.get("notional_usd", 0))
+            coin = trade.get("coin", "")
+            side = trade.get("side", "")
+            direction = trade.get("direction", "")
+            price = float(trade.get("price", 0))
+            size = float(trade.get("size", 0))
+            time_str = trade.get("time_str", "")[-8:]  # Just time part
+
+            is_long = direction == "long" or side == "B"
+            dir_emoji = "🟢" if is_long else "🔴"
+            dir_text = "LONG" if is_long else "SHORT"
+
+            lines.append(
+                f"{dir_emoji} <b>{coin}</b> {dir_text} {format_usd_short(notional)}\n"
+                f"   {size:,.4f} @ ${price:,.2f}\n"
+                f"   {time_str}"
+            )
+
+        await message.reply("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error getting indexed trades: {e}")
+        await message.reply(f"Error fetching indexed trades: {str(e)}")
 
 
 @router.message(Command("hl_analytics"))
