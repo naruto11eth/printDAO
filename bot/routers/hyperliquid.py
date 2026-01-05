@@ -45,6 +45,15 @@ def format_percent(value: Decimal | float) -> str:
     return f"{val:.2f}%"
 
 
+def format_pnl(usd_value: Decimal | float, percent_value: Decimal | float) -> str:
+    """Format PNL as USD with percentage in parentheses."""
+    usd = float(usd_value) if isinstance(usd_value, Decimal) else usd_value
+    pct = float(percent_value) if isinstance(percent_value, Decimal) else percent_value
+    usd_str = f"+${usd:,.2f}" if usd >= 0 else f"-${abs(usd):,.2f}"
+    pct_str = f"+{pct:.1f}%" if pct >= 0 else f"{pct:.1f}%"
+    return f"{usd_str} ({pct_str})"
+
+
 @router.message(Command("hl_trades"))
 async def cmd_hl_trades(
     message: Message,
@@ -258,8 +267,8 @@ async def cmd_hl_positions(
         for pos in state.positions[:10]:
             dir_emoji = "🟢" if pos.direction == Direction.LONG else "🔴"
             dir_text = "LONG" if pos.direction == Direction.LONG else "SHORT"
-            pnl_str = format_usd(pos.unrealized_pnl)
-            roe_str = format_percent(float(pos.return_on_equity) * 100)
+            roe_pct = float(pos.return_on_equity) * 100
+            pnl_str = format_pnl(pos.unrealized_pnl, roe_pct)
 
             leverage_str = f" {float(pos.leverage):.0f}x" if pos.leverage else ""
 
@@ -267,7 +276,7 @@ async def cmd_hl_positions(
                 f"\n{dir_emoji} <b>{pos.coin}</b> {dir_text}{leverage_str}\n"
                 f"   Size: {float(pos.abs_size):,.4f} (${float(pos.position_value):,.0f})\n"
                 f"   Entry: ${float(pos.entry_px):,.2f}\n"
-                f"   PnL: {pnl_str} ({roe_str})"
+                f"   PnL: {pnl_str}"
             )
 
         if len(state.positions) > 10:
