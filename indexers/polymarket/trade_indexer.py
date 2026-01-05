@@ -131,7 +131,7 @@ class PolymarketTradeIndexer:
                 self._hour_trades.append(now)
                 self._stats.total_trades_indexed += 1
                 self._stats.total_volume_usd += trade.usdc_size
-                self._stats.last_trade_time = trade.timestamp_str
+                self._stats.last_trade_time = trade.datetime.strftime("%H:%M:%S")
 
                 if self.on_trade:
                     await self.on_trade(trade)
@@ -155,22 +155,21 @@ class PolymarketTradeIndexer:
         trade_data = {
             "tx_hash": trade.transaction_hash,
             "timestamp": trade.timestamp,
-            "timestamp_str": trade.timestamp_str,
-            "market_slug": trade.market_slug or "",
+            "timestamp_str": trade.datetime.strftime("%Y-%m-%d %H:%M:%S"),
+            "market_slug": trade.slug or "",
             "outcome": trade.outcome or "",
             "side": trade.side.value if trade.side else "",
             "size": trade.size,
             "price": trade.price,
             "usdc_size": trade.usdc_size,
-            "maker": trade.maker or "",
-            "taker": trade.taker or "",
-            "event_title": trade.event_title or "",
+            "trader": trade.proxy_wallet or "",
+            "event_title": trade.title or "",
         }
         await r.hset(trade_key, mapping=trade_data)
         await r.expire(trade_key, self.trades_ttl)
         await r.zadd(self.TRADES_KEY, {trade.transaction_hash: trade.timestamp})
-        if trade.taker:
-            await r.sadd(self.WALLETS_KEY, trade.taker)
+        if trade.proxy_wallet:
+            await r.sadd(self.WALLETS_KEY, trade.proxy_wallet)
 
     async def _store_whale(self, trade: Trade) -> None:
         r = await self._get_redis()

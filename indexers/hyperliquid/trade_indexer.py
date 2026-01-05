@@ -43,20 +43,17 @@ class HyperliquidTradeIndexer:
     COINS_KEY = "hl:coins"
     STATS_KEY = "hl:indexer:stats"
 
-    # All major coins to monitor
+    # Top coins to monitor (reduced to avoid rate limits)
     ALL_COINS = [
         "BTC", "ETH", "SOL", "DOGE", "WIF", "PEPE", "ARB", "SUI", "AVAX", "LINK",
-        "XRP", "MATIC", "OP", "APT", "INJ", "TIA", "SEI", "NEAR", "ATOM", "FTM",
-        "LTC", "BCH", "ETC", "FIL", "AAVE", "MKR", "UNI", "CRV", "LDO", "BLUR",
-        "STX", "IMX", "MINA", "KAVA", "RUNE", "SNX", "COMP", "GMX", "PENDLE", "JTO",
-        "PYTH", "JUP", "ONDO", "W", "ENA", "BOME", "MEW", "POPCAT", "MOTHER", "BRETT"
+        "XRP", "OP", "APT", "INJ", "TIA"
     ]
 
     def __init__(
         self,
         redis_url: str = "redis://localhost:6379/0",
         whale_threshold: float = 10_000_000.0,  # $10M for HL
-        poll_interval: float = 3.0,
+        poll_interval: float = 5.0,  # Increased to avoid rate limits
         trades_ttl: int = 86400 * 7,
         coins: Optional[List[str]] = None,
         on_trade: Optional[Callable[[Trade], Awaitable[None]]] = None,
@@ -127,9 +124,14 @@ class HyperliquidTradeIndexer:
             await asyncio.sleep(self.poll_interval)
 
     async def _poll_all_coins(self) -> None:
-        """Poll trades for all coins concurrently."""
-        tasks = [self._poll_coin(coin) for coin in self.coins]
-        await asyncio.gather(*tasks, return_exceptions=True)
+        """Poll trades for all coins in batches to avoid rate limits."""
+        batch_size = 5
+        for i in range(0, len(self.coins), batch_size):
+            batch = self.coins[i:i + batch_size]
+            tasks = [self._poll_coin(coin) for coin in batch]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if i + batch_size < len(self.coins):
+                await asyncio.sleep(1)  # Wait between batches
 
     async def _poll_coin(self, coin: str) -> None:
         try:
