@@ -12,8 +12,11 @@ from bot.config import BotConfig, setup_logging
 from bot.storage.redis_client import RedisClient
 from bot.services.wallet_service import WalletService
 from bot.services.notification_service import NotificationService
-from bot.routers import general, tracking, polymarket
+from bot.services.position_indexer import PositionIndexer
+from bot.services.whale_detector import ConfigurableWhaleDetector
+from bot.routers import general, tracking, polymarket, hyperliquid
 from indexers.polymarket import PolymarketIndexer
+from indexers.hyperliquid import HyperliquidClient
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +55,13 @@ async def main() -> None:
     wallet_service = WalletService(redis_client, config.max_tracked_wallets_per_user)
     notification_service = NotificationService(bot)
 
+    # Initialize Hyperliquid client
+    hyperliquid_client = HyperliquidClient(
+        testnet=False,
+        max_retries=5,
+        backoff_seconds=0.5,
+    )
+
     # Initialize Polymarket indexer
     polymarket_indexer = PolymarketIndexer(
         redis_client=redis_client,
@@ -60,6 +70,17 @@ async def main() -> None:
         poll_interval=30.0,
     )
 
+    # Initialize Position indexer for analytics tracking
+    position_indexer = PositionIndexer(
+        redis_client=redis_client,
+        wallet_service=wallet_service,
+        hyperliquid_client=hyperliquid_client,
+        poll_interval=60.0,
+    )
+
+    # Initialize configurable whale detector
+    whale_detector = ConfigurableWhaleDetector(redis_client=redis_client)
+
     # Initialize dispatcher with services in workflow_data
     dp = Dispatcher()
 
@@ -67,13 +88,17 @@ async def main() -> None:
     dp["redis_client"] = redis_client
     dp["wallet_service"] = wallet_service
     dp["notification_service"] = notification_service
+    dp["hyperliquid_client"] = hyperliquid_client
     dp["polymarket_indexer"] = polymarket_indexer
+    dp["position_indexer"] = position_indexer
+    dp["whale_detector"] = whale_detector
     dp["config"] = config
 
     # Register routers
     dp.include_router(general.router)
     dp.include_router(tracking.router)
     dp.include_router(polymarket.router)
+    dp.include_router(hyperliquid.router)
 
     # Startup handler
     @dp.startup()
@@ -87,12 +112,16 @@ async def main() -> None:
         # Start Polymarket indexer
         await polymarket_indexer.start()
 
+        # Start Position indexer
+        await position_indexer.start()
+
     # Shutdown handler
     @dp.shutdown()
     async def on_shutdown() -> None:
         logger.info("Shutting down...")
-        # Stop Polymarket indexer
+        # Stop indexers
         await polymarket_indexer.stop()
+        await position_indexer.stop()
         await redis_client.disconnect()
         logger.info("Shutdown complete.")
 

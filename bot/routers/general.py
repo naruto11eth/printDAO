@@ -5,9 +5,11 @@ from typing import Optional
 
 from aiogram import Router
 from aiogram.types import Message
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, CommandObject
 
 from bot.storage.redis_client import RedisClient
+from bot.services.whale_detector import ConfigurableWhaleDetector
+from shared.utils import format_usd
 
 logger = logging.getLogger(__name__)
 
@@ -60,15 +62,25 @@ async def cmd_help(message: Message) -> None:
 /pm_unsubscribe - Stop whale alerts
 
 <b>Hyperliquid:</b>
-/hl_positions &lt;address&gt; - Show positions
-/hl_pnl &lt;address&gt; [period] - Show PnL
-/hl_sentiment &lt;coin&gt; - Market sentiment
+/hl_positions &lt;address&gt; - Positions
+/hl_pnl &lt;address&gt; - PnL summary
+/hl_fills &lt;address&gt; - Recent fills
+/hl_analytics &lt;address&gt; - Trader analytics
+/hl_trades &lt;coin&gt; - Recent trades
+/hl_sentiment &lt;coin&gt; - Sentiment
+/hl_market &lt;coin&gt; - Market info
+/hl_whales [min_size] - Whale trades
+/hl_coins - List coins
+
+<b>Whale Config:</b>
+/whale_config - Show config
+/set_whale_threshold - Set threshold
+/toggle_new_whale - Toggle detection
+/new_whales - Show new whales
 
 <b>Other:</b>
 /help - Show this message
-/status - Bot status
-
-<i>Tip: Add --exchange=polymarket to filter by exchange</i>"""
+/status - Bot status"""
 
     await message.reply(help_text, parse_mode="HTML")
 
@@ -93,3 +105,172 @@ async def cmd_status(message: Message, redis_client: Optional[RedisClient] = Non
     status_text += "• Polymarket\n"
 
     await message.reply(status_text, parse_mode="HTML")
+
+
+@router.message(Command("whale_config"))
+async def cmd_whale_config(
+    message: Message,
+    whale_detector: Optional[ConfigurableWhaleDetector] = None,
+) -> None:
+    """Show current whale detection configuration."""
+    if not whale_detector:
+        await message.reply("Whale detector is not available.")
+        return
+
+    config = whale_detector.config
+
+    lines = [
+        "<b>🐋 Whale Detection Config</b>\n",
+        "<b>Thresholds:</b>",
+        f"  Hyperliquid: {format_usd(config.hyperliquid_threshold)}",
+        f"  Polymarket: {format_usd(config.polymarket_threshold)}\n",
+        "<b>New Wallet Detection:</b>",
+        f"  Enabled: {'✅' if config.new_wallet_detection_enabled else '❌'}",
+        f"  First Trade Threshold: {format_usd(config.new_wallet_first_trade_threshold)}",
+        f"  Age Window: {config.new_wallet_age_hours}h\n",
+        "<b>Alerts:</b>",
+        f"  Cooldown: {config.alert_cooldown_seconds}s\n",
+        "<i>Use /set_whale_threshold to adjust</i>",
+    ]
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("set_whale_threshold"))
+async def cmd_set_whale_threshold(
+    message: Message,
+    command: CommandObject,
+    whale_detector: Optional[ConfigurableWhaleDetector] = None,
+) -> None:
+    """Set whale detection threshold.
+
+    Usage: /set_whale_threshold <exchange> <amount>
+    """
+    if not command.args:
+        await message.reply(
+            "<b>Usage:</b> /set_whale_threshold &lt;exchange&gt; &lt;amount&gt;\n\n"
+            "<b>Examples:</b>\n"
+            "<code>/set_whale_threshold hyperliquid 5M</code>\n"
+            "<code>/set_whale_threshold polymarket 25000</code>\n"
+            "<code>/set_whale_threshold newwallet 100000</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    if not whale_detector:
+        await message.reply("Whale detector is not available.")
+        return
+
+    parts = command.args.strip().lower().split()
+    if len(parts) < 2:
+        await message.reply("Please provide both exchange and amount.")
+        return
+
+    exchange = parts[0]
+    amount_str = parts[1].upper().replace("$", "").replace(",", "")
+
+    # Parse amount (handle M/K suffixes)
+    try:
+        if amount_str.endswith("M"):
+            amount = float(amount_str[:-1]) * 1_000_000
+        elif amount_str.endswith("K"):
+            amount = float(amount_str[:-1]) * 1_000
+        else:
+            amount = float(amount_str)
+    except ValueError:
+        await message.reply("Invalid amount format.")
+        return
+
+    # Update config
+    if exchange == "hyperliquid" or exchange == "hl":
+        await whale_detector.update_config(hyperliquid_threshold=amount)
+        await message.reply(
+            f"✅ Hyperliquid whale threshold set to {format_usd(amount)}",
+            parse_mode="HTML",
+        )
+    elif exchange == "polymarket" or exchange == "pm":
+        await whale_detector.update_config(polymarket_threshold=amount)
+        await message.reply(
+            f"✅ Polymarket whale threshold set to {format_usd(amount)}",
+            parse_mode="HTML",
+        )
+    elif exchange == "newwallet" or exchange == "new":
+        await whale_detector.update_config(new_wallet_first_trade_threshold=amount)
+        await message.reply(
+            f"✅ New wallet threshold set to {format_usd(amount)}",
+            parse_mode="HTML",
+        )
+    else:
+        await message.reply(
+            "Unknown exchange. Use: hyperliquid, polymarket, or newwallet"
+        )
+
+
+@router.message(Command("toggle_new_whale"))
+async def cmd_toggle_new_whale(
+    message: Message,
+    whale_detector: Optional[ConfigurableWhaleDetector] = None,
+) -> None:
+    """Toggle new wallet detection on/off."""
+    if not whale_detector:
+        await message.reply("Whale detector is not available.")
+        return
+
+    current = whale_detector.config.new_wallet_detection_enabled
+    await whale_detector.update_config(new_wallet_detection_enabled=not current)
+
+    status = "enabled" if not current else "disabled"
+    emoji = "✅" if not current else "❌"
+
+    await message.reply(
+        f"{emoji} New wallet detection is now <b>{status}</b>",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("new_whales"))
+async def cmd_new_whales(
+    message: Message,
+    command: CommandObject,
+    whale_detector: Optional[ConfigurableWhaleDetector] = None,
+) -> None:
+    """Show recently discovered whales.
+
+    Usage: /new_whales [exchange] [hours]
+    """
+    if not whale_detector:
+        await message.reply("Whale detector is not available.")
+        return
+
+    parts = command.args.strip().split() if command.args else []
+    exchange = parts[0] if parts else "hyperliquid"
+    hours = int(parts[1]) if len(parts) > 1 else 24
+
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    new_whales = await whale_detector.get_new_whales(exchange, hours=hours)
+
+    if not new_whales:
+        await message.reply(
+            f"No new whales discovered on {exchange} in the last {hours} hours.",
+            parse_mode="HTML",
+        )
+        return
+
+    lines = [
+        f"<b>🐋 New Whales ({exchange})</b>",
+        f"<i>Discovered in last {hours} hours</i>\n",
+    ]
+
+    for whale in new_whales[:10]:
+        addr_short = f"{whale.address[:6]}...{whale.address[-4:]}"
+        lines.append(
+            f"<code>{addr_short}</code>\n"
+            f"  Volume: {format_usd(whale.total_volume)}\n"
+            f"  Trades: {whale.total_trades} | Age: {whale.age_hours:.1f}h"
+        )
+
+    if len(new_whales) > 10:
+        lines.append(f"\n<i>... and {len(new_whales) - 10} more</i>")
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
