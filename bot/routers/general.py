@@ -57,7 +57,8 @@ async def cmd_help(message: Message) -> None:
 /pm_positions &lt;address&gt; - Show positions
 /pm_pnl &lt;address&gt; [period] - Show PnL
 /pm_trades &lt;address&gt; - Recent trades
-/pm_whales [min_size] - Whale trades
+/pm_whales [filter] - Whale trades
+/pm_indexed [filter] - Indexed trades
 /pm_subscribe - Get whale alerts
 /pm_unsubscribe - Stop whale alerts
 
@@ -66,11 +67,19 @@ async def cmd_help(message: Message) -> None:
 /hl_pnl &lt;address&gt; - PnL summary
 /hl_fills &lt;address&gt; - Recent fills
 /hl_analytics &lt;address&gt; - Trader analytics
-/hl_trades &lt;coin&gt; - Recent trades
+/hl_trades &lt;coin&gt; [filter] - Recent trades
 /hl_sentiment &lt;coin&gt; - Sentiment
 /hl_market &lt;coin&gt; - Market info
-/hl_whales [min_size] - Whale trades
+/hl_whales [filter] - Whale trades
+/hl_indexed [filter] - Indexed trades
 /hl_coins - List coins
+
+<b>Filter Examples:</b>
+<code>&gt;40k</code> or <code>40k+</code> - Above $40k
+<code>&lt;100k</code> - Below $100k
+<code>10k-50k</code> - Between $10k-$50k
+<code>btc</code> or <code>trump</code> - Text search
+<code>btc &gt;500k</code> - Combine filters
 
 <b>Whale Config:</b>
 /whale_config - Show config
