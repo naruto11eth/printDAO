@@ -31,6 +31,13 @@ def format_percent(value: float) -> str:
     return f"{value:.1f}%"
 
 
+def format_pnl(usd_value: float, percent_value: float) -> str:
+    """Format PNL as USD with percentage in parentheses."""
+    usd_str = f"+${usd_value:,.2f}" if usd_value >= 0 else f"-${abs(usd_value):,.2f}"
+    pct_str = f"+{percent_value:.1f}%" if percent_value >= 0 else f"{percent_value:.1f}%"
+    return f"{usd_str} ({pct_str})"
+
+
 @router.message(Command("pm_positions"))
 async def cmd_pm_positions(
     message: Message,
@@ -86,7 +93,7 @@ async def cmd_pm_positions(
 
         # Show top 5 positions
         for i, pos in enumerate(positions[:5], 1):
-            pnl_str = format_usd(pos.cash_pnl)
+            pnl_str = format_pnl(pos.cash_pnl, pos.percent_pnl)
             pnl_color = "🟢" if pos.cash_pnl >= 0 else "🔴"
 
             lines.append(
@@ -228,7 +235,7 @@ async def cmd_pm_trades(
 
             lines.append(
                 f"{side_emoji} <b>{trade.title[:35]}{'...' if len(trade.title) > 35 else ''}</b>\n"
-                f"   {trade.outcome} | ${trade.usdc_size:,.0f} @ {trade.price:.1f}%\n"
+                f"   {trade.outcome} | ${trade.usdc_size:,.0f} @ {trade.price*100:.0f}%\n"
                 f"   {time_str}"
             )
 
@@ -311,14 +318,19 @@ async def cmd_pm_whales(
             side_emoji = "🟢" if trade.side.value == "BUY" else "🔴"
             time_str = trade.datetime.strftime("%m/%d %H:%M")
 
-            # Calculate potential PNL
+            # Calculate potential PNL (profit if position wins)
             if trade.side.value == "BUY":
                 pnl = trade.usdc_size * (1 - trade.price) / trade.price if trade.price > 0 else 0
+                pnl_pct = (1 - trade.price) / trade.price * 100 if trade.price > 0 else 0
             else:
                 pnl = trade.usdc_size * trade.price / (1 - trade.price) if trade.price < 1 else 0
+                pnl_pct = trade.price / (1 - trade.price) * 100 if trade.price < 1 else 0
+
+            # Format: $1,234 (+150%)
+            pnl_str = f"${pnl:,.0f} (+{pnl_pct:.0f}%)"
 
             lines.append(
-                f"{side_emoji} <b>${trade.usdc_size:,.0f}</b> | PNL: ${pnl:,.0f}\n"
+                f"{side_emoji} <b>${trade.usdc_size:,.0f}</b> | PNL: {pnl_str}\n"
                 f"   {trade.title[:45]}{'...' if len(trade.title) > 45 else ''}\n"
                 f"   {trade.outcome} @ {trade.price*100:.0f}% | {time_str}"
             )
@@ -416,14 +428,19 @@ async def cmd_pm_indexed(
 
             side_emoji = "🟢" if side == "BUY" else "🔴"
 
-            # Calculate potential PNL
+            # Calculate potential PNL (profit if position wins)
             if side == "BUY":
                 pnl = usdc_size * (1 - price) / price if price > 0 else 0
+                pnl_pct = (1 - price) / price * 100 if price > 0 else 0
             else:
                 pnl = usdc_size * price / (1 - price) if price < 1 else 0
+                pnl_pct = price / (1 - price) * 100 if price < 1 else 0
+
+            # Format: $1,234 (+150%)
+            pnl_str = f"${pnl:,.0f} (+{pnl_pct:.0f}%)"
 
             lines.append(
-                f"{side_emoji} <b>${usdc_size:,.0f}</b> | PNL: ${pnl:,.0f}\n"
+                f"{side_emoji} <b>${usdc_size:,.0f}</b> | PNL: {pnl_str}\n"
                 f"   {title[:45]}{'...' if len(title) > 45 else ''}\n"
                 f"   {outcome} @ {price*100:.0f}% | {time_str}"
             )
