@@ -65,24 +65,39 @@ brew services start redis
 redis-cli ping  # Should return PONG
 ```
 
-### 4. Run the CLI (Live Dashboard)
+### 4. Run the CLI
 
+**Live Dashboard (default)**
 ```bash
-# Run Polymarket dashboard (default)
 python -m cli.simple
-
-# Run Hyperliquid dashboard
-python -m cli.simple hyperliquid
-
-# Or use shortcuts
-python -m cli.simple pm   # Polymarket
-python -m cli.simple hl   # Hyperliquid
 ```
 
-You'll see a live-updating dashboard with:
-- **Polymarket**: Recent trades ($1k+), whale alerts ($10k+)
-- **Hyperliquid**: Trades across top 10 coins (BTC, ETH, SOL, etc.), whale alerts ($10M+)
-- Real-time stats (volume, trade count)
+Keyboard controls:
+- `P` - Polymarket tab
+- `H` - Hyperliquid tab
+- `W` - Whales tab (both exchanges)
+- `A` - All exchanges
+- `/` - Search/filter mode
+- `Q` - Quit
+
+**One-off Commands**
+```bash
+# Polymarket
+python -m cli.simple --pm-whales            # Whales >$10k
+python -m cli.simple --pm-whales ">50k"     # Above $50k
+python -m cli.simple --pm-whales trump      # Filter by market name
+python -m cli.simple --pm-trades            # Recent trades
+python -m cli.simple --pm-trades bitcoin    # Filter by text
+
+# Hyperliquid
+python -m cli.simple --hl-whales            # Whales >$1M
+python -m cli.simple --hl-whales btc        # BTC whales only
+python -m cli.simple --hl-trades BTC        # Recent BTC trades
+python -m cli.simple --hl-trades ETH ">100k" # ETH trades >$100k
+
+# Help
+python -m cli.simple --help
+```
 
 Press `Ctrl+C` to exit.
 
@@ -107,16 +122,28 @@ Then:
 
 ## Commands
 
-### Wallet Tracking
+### Filter Syntax
 
+Both CLI and Telegram support the same filter syntax:
+
+```
+>40k or 40k+    Above $40k
+<100k           Below $100k
+10k-50k         Between $10k-$50k
+btc / trump     Text search (coin or market name)
+btc >500k       Combined filters
+```
+
+### Telegram Bot Commands
+
+**Wallet Tracking**
 ```
 /track <address> [label]       - Start tracking a wallet
 /untrack <address|label>       - Stop tracking a wallet
 /list                          - List your tracked wallets
 ```
 
-### Wallet Groups
-
+**Wallet Groups**
 ```
 /creategroup <name> [desc]     - Create a wallet group
 /groups                        - List your groups
@@ -125,30 +152,54 @@ Then:
 /deletegroup <name>            - Delete a group
 ```
 
-### Polymarket
-
+**Polymarket**
 ```
-/pm_positions <address>        - Show Polymarket positions
+/pm_positions <address>        - Show positions
 /pm_pnl <address> [period]     - Show PnL (day|week|month|all)
-/pm_trades <address> [hours]   - Recent trades
-/pm_whales [min_size]          - View whale trades ($10k+ default)
+/pm_trades <address> [hours]   - Recent trades for address
+/pm_whales [filter]            - Whale trades with optional filter
+/pm_indexed [filter]           - Indexed trades from Redis
 /pm_subscribe                  - Subscribe to whale alerts
-/pm_unsubscribe                - Unsubscribe from whale alerts
+/pm_unsubscribe                - Unsubscribe from alerts
 ```
 
-### Hyperliquid
-
+**Hyperliquid**
 ```
-/hl_positions <address>        - Show Hyperliquid positions
-/hl_pnl <address> [period]     - Show PnL
+/hl_positions <address>        - Show positions
+/hl_pnl <address>              - Show PnL
+/hl_trades <coin> [filter]     - Recent trades with optional filter
+/hl_whales [filter]            - Whale trades with optional filter
+/hl_indexed [filter]           - Indexed trades from Redis
 /hl_sentiment <coin>           - Market sentiment
-/hl_trades <coin>              - Recent trades for a coin
+/hl_market <coin>              - Market info
+/hl_coins                      - List available coins
+/hl_analytics <address>        - Trader analytics
 ```
 
-**CLI Only (no Telegram commands yet):**
-- Live trades dashboard for top 10 coins
-- Whale alerts for $10M+ trades
-- Market sentiment analysis
+**Filter Examples**
+```
+/pm_whales >50k                - PM whales above $50k
+/pm_whales trump               - PM whales matching "trump"
+/pm_indexed 10k-100k           - PM trades between $10k-$100k
+/hl_whales btc                 - HL whales for BTC
+/hl_trades ETH >100k           - ETH trades above $100k
+/hl_indexed sol                - Indexed SOL trades
+```
+
+### CLI Commands
+
+**Live Dashboard**
+```bash
+python -m cli.simple           # Live dashboard with tabs
+```
+
+**One-off Queries**
+```bash
+python -m cli.simple --pm-whales [filter]
+python -m cli.simple --pm-trades [filter]
+python -m cli.simple --hl-whales [filter]
+python -m cli.simple --hl-trades <coin> [filter]
+```
 
 ## Project Structure
 
