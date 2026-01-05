@@ -11,9 +11,11 @@ from .models import (
     TradeSide,
     Direction,
 )
+from .trade_indexer import HyperliquidTradeIndexer
 
 __all__ = [
     "HyperliquidClient",
+    "HyperliquidTradeIndexer",
     "TradeCache",
     "Trade",
     "Position",
