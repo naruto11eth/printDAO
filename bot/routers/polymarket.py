@@ -1,7 +1,7 @@
 """Polymarket commands router."""
 
 import logging
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from aiogram import Router
 from aiogram.types import Message
@@ -9,6 +9,8 @@ from aiogram.filters import Command, CommandObject
 
 from shared.utils import shorten_address, is_valid_ethereum_address
 from indexers.polymarket import PolymarketIndexer, Position
+from bot.utils.filters import parse_filter_args, format_filter_summary
+from bot.storage.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
 
@@ -246,19 +248,27 @@ async def cmd_pm_whales(
     command: CommandObject,
     polymarket_indexer: Optional[PolymarketIndexer] = None,
 ) -> None:
-    """Show recent whale trades on Polymarket.
+    """Show recent whale trades on Polymarket with optional filters.
 
-    Usage: /pm_whales [min_size]
-    Default min_size: $10,000
+    Usage: /pm_whales [filter]
+    Filter examples:
+      /pm_whales 50k          - trades above $50k
+      /pm_whales >100k        - trades above $100k
+      /pm_whales <50k         - trades below $50k
+      /pm_whales 10k-50k      - trades between $10k-$50k
+      /pm_whales bitcoin      - filter by market name
+      /pm_whales trump >50k   - combine text and size filter
     """
     min_size = 10000.0
+    max_size = None
+    text_filter = None
 
     if command.args:
-        try:
-            min_size = float(command.args.strip().replace("$", "").replace(",", ""))
-        except ValueError:
-            await message.reply("Invalid amount. Use a number like 10000 or $10,000")
-            return
+        text_filter, parsed_min, parsed_max = parse_filter_args(command.args)
+        if parsed_min is not None:
+            min_size = parsed_min
+        if parsed_max is not None:
+            max_size = parsed_max
 
     if not polymarket_indexer:
         await message.reply("Polymarket indexer is not available.")
@@ -267,39 +277,162 @@ async def cmd_pm_whales(
     await message.bot.send_chat_action(message.chat.id, "typing")
 
     try:
+        # Fetch more trades if we need to filter
+        fetch_limit = 50 if text_filter or max_size else 15
         trades = await polymarket_indexer.tracker.get_recent_whale_trades(
             min_size=min_size,
-            limit=10,
+            limit=fetch_limit,
         )
 
+        # Apply additional filters
+        if max_size is not None:
+            trades = [t for t in trades if t.usdc_size <= max_size]
+
+        if text_filter:
+            text_lower = text_filter.lower()
+            trades = [t for t in trades if text_lower in t.title.lower() or text_lower in t.outcome.lower()]
+
         if not trades:
+            filter_desc = format_filter_summary(text_filter, min_size, max_size)
             await message.reply(
-                f"No whale trades found above ${min_size:,.0f}",
+                f"No whale trades found matching: {filter_desc}",
                 parse_mode="HTML",
             )
             return
 
+        # Build header
+        filter_desc = format_filter_summary(text_filter, min_size, max_size)
         lines = [
             f"<b>🐋 Polymarket Whale Trades</b>",
-            f"<i>Trades above ${min_size:,.0f}</i>\n",
+            f"<i>Filter: {filter_desc}</i>\n",
         ]
 
-        for trade in trades:
+        for trade in trades[:15]:
             side_emoji = "🟢" if trade.side.value == "BUY" else "🔴"
-            trader = trade.pseudonym or trade.name or shorten_address(trade.proxy_wallet)
             time_str = trade.datetime.strftime("%m/%d %H:%M")
 
+            # Calculate potential PNL
+            if trade.side.value == "BUY":
+                pnl = trade.usdc_size * (1 - trade.price) / trade.price if trade.price > 0 else 0
+            else:
+                pnl = trade.usdc_size * trade.price / (1 - trade.price) if trade.price < 1 else 0
+
             lines.append(
-                f"{side_emoji} <b>${trade.usdc_size:,.0f}</b> by {trader}\n"
-                f"   {trade.title[:40]}{'...' if len(trade.title) > 40 else ''}\n"
-                f"   {trade.outcome} @ {trade.price:.1f}% | {time_str}"
+                f"{side_emoji} <b>${trade.usdc_size:,.0f}</b> | PNL: ${pnl:,.0f}\n"
+                f"   {trade.title[:45]}{'...' if len(trade.title) > 45 else ''}\n"
+                f"   {trade.outcome} @ {trade.price*100:.0f}% | {time_str}"
             )
+
+        if len(trades) > 15:
+            lines.append(f"\n<i>... and {len(trades) - 15} more</i>")
 
         await message.reply("\n".join(lines), parse_mode="HTML")
 
     except Exception as e:
         logger.error(f"Error getting whale trades: {e}")
         await message.reply(f"Error fetching whale trades: {str(e)}")
+
+
+@router.message(Command("pm_indexed"))
+async def cmd_pm_indexed(
+    message: Message,
+    command: CommandObject,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Show indexed Polymarket trades from Redis with filters.
+
+    Usage: /pm_indexed [filter]
+    Filter examples:
+      /pm_indexed             - all recent trades
+      /pm_indexed >40k        - trades above $40k
+      /pm_indexed trump       - filter by market name
+      /pm_indexed bitcoin 10k - combine filters
+    """
+    if not redis_client:
+        await message.reply("Redis is not available. Indexer may not be running.")
+        return
+
+    # Parse filters
+    text_filter, min_size, max_size = None, None, None
+    if command.args:
+        text_filter, min_size, max_size = parse_filter_args(command.args)
+
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    try:
+        # Get recent trades from Redis
+        tx_hashes = await redis_client.zrange("pm:trades", 0, 99, desc=True)
+
+        if not tx_hashes:
+            await message.reply("No indexed trades found. Indexer may not be running.")
+            return
+
+        trades = []
+        for tx_hash in tx_hashes:
+            trade_data = await redis_client.redis.hgetall(f"pm:trade:{tx_hash}")
+            if trade_data:
+                # Apply filters
+                usdc_size = float(trade_data.get("usdc_size", 0))
+                market_title = trade_data.get("event_title", "")
+                outcome = trade_data.get("outcome", "")
+
+                # Size filter
+                if min_size is not None and usdc_size < min_size:
+                    continue
+                if max_size is not None and usdc_size > max_size:
+                    continue
+
+                # Text filter
+                if text_filter:
+                    text_lower = text_filter.lower()
+                    if text_lower not in market_title.lower() and text_lower not in outcome.lower():
+                        continue
+
+                trades.append(trade_data)
+                if len(trades) >= 15:
+                    break
+
+        if not trades:
+            filter_desc = format_filter_summary(text_filter, min_size, max_size)
+            await message.reply(
+                f"No indexed trades found matching: {filter_desc}",
+                parse_mode="HTML",
+            )
+            return
+
+        filter_desc = format_filter_summary(text_filter, min_size, max_size)
+        lines = [
+            f"<b>📊 Indexed Polymarket Trades</b>",
+            f"<i>Filter: {filter_desc}</i>\n",
+        ]
+
+        for trade in trades:
+            usdc_size = float(trade.get("usdc_size", 0))
+            price = float(trade.get("price", 0))
+            side = trade.get("side", "")
+            title = trade.get("event_title", "Unknown")
+            outcome = trade.get("outcome", "")
+            time_str = trade.get("timestamp_str", "")[-8:]  # Just time part
+
+            side_emoji = "🟢" if side == "BUY" else "🔴"
+
+            # Calculate potential PNL
+            if side == "BUY":
+                pnl = usdc_size * (1 - price) / price if price > 0 else 0
+            else:
+                pnl = usdc_size * price / (1 - price) if price < 1 else 0
+
+            lines.append(
+                f"{side_emoji} <b>${usdc_size:,.0f}</b> | PNL: ${pnl:,.0f}\n"
+                f"   {title[:45]}{'...' if len(title) > 45 else ''}\n"
+                f"   {outcome} @ {price*100:.0f}% | {time_str}"
+            )
+
+        await message.reply("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error getting indexed trades: {e}")
+        await message.reply(f"Error fetching indexed trades: {str(e)}")
 
 
 @router.message(Command("pm_subscribe"))
