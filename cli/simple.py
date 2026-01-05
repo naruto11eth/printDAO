@@ -86,7 +86,7 @@ def create_pm_trades_table(trades: list[PMTrade]) -> Table:
     table.add_column("Price", justify="right", width=6)
     table.add_column("Trader", width=15, overflow="ellipsis")
 
-    for t in trades[:15]:
+    for t in trades:  # Show ALL trades
         time_str = datetime.fromtimestamp(t.timestamp).strftime("%H:%M:%S")
         side_style = "green" if t.side.value == "BUY" else "red"
         trader = t.pseudonym or t.name or f"{t.proxy_wallet[:10]}..."
@@ -114,13 +114,13 @@ def create_pm_whales_table(whales: list[PMTrade]) -> Table:
     table.add_column("Position", width=10, overflow="ellipsis")
     table.add_column("Price", justify="right", width=6)
 
-    for t in whales[:10]:
+    for t in whales:  # Show ALL whales
         time_str = datetime.fromtimestamp(t.timestamp).strftime("%H:%M:%S")
         side_style = "green" if t.side.value == "BUY" else "red"
 
         table.add_row(
             time_str,
-            Text(t.side.value, style=side_style),
+            Text(t.side.value, side_style),
             f"${t.usdc_size:,.0f}",
             t.title[:25] + ("..." if len(t.title) > 25 else ""),
             t.outcome[:10],
@@ -142,7 +142,7 @@ def create_hl_trades_table(trades: list[HLTrade]) -> Table:
     table.add_column("Price", justify="right", width=12)
     table.add_column("Notional", justify="right", width=14)
 
-    for t in trades[:15]:
+    for t in trades:  # Show ALL trades
         time_str = t.datetime.strftime("%H:%M:%S")
         is_buy = t.side.value == "B"
         side_text = "LONG" if is_buy else "SHORT"
@@ -169,7 +169,7 @@ def create_hl_whales_table(whales: list[HLTrade]) -> Table:
     table.add_column("Notional", justify="right", style="bold yellow", width=14)
     table.add_column("Price", justify="right", width=12)
 
-    for t in whales[:10]:
+    for t in whales:  # Show ALL whales
         time_str = t.datetime.strftime("%H:%M:%S")
         is_buy = t.side.value == "B"
         side_text = "LONG" if is_buy else "SHORT"
@@ -325,16 +325,16 @@ def create_all_exchanges_layout(
         "last_update": pm_stats.get("last_update", "N/A"),
     }
 
-    # Polymarket panel (trades only, condensed)
+    # Polymarket panel (trades only)
     pm_content = Layout()
     pm_content.split_column(
-        Layout(create_pm_trades_table(pm_trades[:8]), name="trades"),
+        Layout(create_pm_trades_table(pm_trades), name="trades"),
     )
 
-    # Hyperliquid panel (trades only, condensed)
+    # Hyperliquid panel (trades only)
     hl_content = Layout()
     hl_content.split_column(
-        Layout(create_hl_trades_table(hl_trades[:8]), name="trades"),
+        Layout(create_hl_trades_table(hl_trades), name="trades"),
     )
 
     layout["header"].update(Panel(create_header_text("all", combined_stats), style="bold"))
@@ -411,7 +411,7 @@ class PrintDAOCLI:
     async def fetch_polymarket(self) -> None:
         """Fetch Polymarket data."""
         try:
-            trades = await self.pm_client.get_trades(min_size=1000, limit=50)
+            trades = await self.pm_client.get_trades(limit=500)  # Fetch max trades per poll
 
             for t in trades:
                 if t.transaction_hash not in self.pm_seen_tx:
@@ -421,9 +421,9 @@ class PrintDAOCLI:
                     if t.usdc_size >= 10000:
                         self.pm_whales.insert(0, t)
 
-            # Keep lists bounded
-            self.pm_trades = self.pm_trades[:100]
-            self.pm_whales = self.pm_whales[:50]
+            # Keep lists bounded (high limits for full history)
+            self.pm_trades = self.pm_trades[:10000]
+            self.pm_whales = self.pm_whales[:1000]
 
             # Update stats
             if self.pm_trades:
@@ -441,7 +441,7 @@ class PrintDAOCLI:
         try:
             for coin in self.hl_coins:
                 try:
-                    trades = await self.hl_client.get_recent_trades(coin, limit=20)
+                    trades = await self.hl_client.get_recent_trades(coin, limit=100)
 
                     for t in trades:
                         if t.tid not in self.hl_seen_tid:
@@ -454,9 +454,9 @@ class PrintDAOCLI:
                 except Exception:
                     pass  # Skip failed coin fetches
 
-            # Keep lists bounded
-            self.hl_trades = self.hl_trades[:100]
-            self.hl_whales = self.hl_whales[:50]
+            # Keep lists bounded (high limits for full history)
+            self.hl_trades = self.hl_trades[:10000]
+            self.hl_whales = self.hl_whales[:1000]
 
             # Sort by time
             self.hl_trades.sort(key=lambda t: t.time_ms, reverse=True)
