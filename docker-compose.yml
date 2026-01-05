@@ -16,18 +16,31 @@ services:
       timeout: 5s
       retries: 5
 
-  # Uncomment to run the bot in Docker
-  # bot:
-  #   build: .
-  #   container_name: printdao-bot
-  #   depends_on:
-  #     redis:
-  #       condition: service_healthy
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     - REDIS_URL=redis://redis:6379/0
-  #   restart: unless-stopped
+  indexer:
+    build: .
+    container_name: printdao-indexer
+    command: ["python", "run_indexer.py"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    restart: unless-stopped
+
+  bot:
+    build: .
+    container_name: printdao-bot
+    command: ["python", "-m", "bot.main"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      indexer:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    restart: unless-stopped
 
 volumes:
   redis_data:
