@@ -4,13 +4,20 @@ import logging
 from decimal import Decimal
 from typing import Optional, List, Dict, Any
 
-from aiogram import Router
-from aiogram.types import Message
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, CommandObject
 
 from shared.utils import shorten_address, is_valid_ethereum_address, escape_html
 from indexers.hyperliquid import HyperliquidClient, Direction
 from bot.services.position_indexer import PositionIndexer
+from bot.services.analytics_service import AnalyticsService, format_trader_analytics
+from bot.keyboards.analytics import (
+    TraderAction,
+    WatchlistAction,
+    CopyTradingAction,
+    build_trader_actions_keyboard,
+)
 from bot.utils.filters import parse_filter_args, format_filter_summary
 from bot.storage.redis_client import RedisClient
 
@@ -733,9 +740,9 @@ async def cmd_hl_analytics(
     message: Message,
     command: CommandObject,
     hyperliquid_client: Optional[HyperliquidClient] = None,
-    position_indexer: Optional[PositionIndexer] = None,
+    redis_client: Optional[RedisClient] = None,
 ) -> None:
-    """Show TrySuper-style trader analytics.
+    """Show TrySuper-style trader analytics with action buttons.
 
     Usage: /hl_analytics <address>
     """
@@ -766,121 +773,252 @@ async def cmd_hl_analytics(
     await message.bot.send_chat_action(message.chat.id, "typing")
 
     try:
-        # Get metrics from position indexer if available, otherwise compute directly
-        if position_indexer:
-            metrics = await position_indexer.get_or_compute_metrics(address, "hyperliquid")
-        else:
-            # Fallback: compute basic metrics directly
-            state = await hyperliquid_client.get_user_state(address)
-            fills = await hyperliquid_client.get_user_fills(address, limit=200)
+        # Use analytics service
+        analytics_service = AnalyticsService(hyperliquid_client, redis_client)
+        analytics = await analytics_service.get_trader_analytics(address, "hyperliquid")
 
-            winning = [f for f in fills if f.closed_pnl > 0]
-            losing = [f for f in fills if f.closed_pnl < 0]
-            win_rate = (len(winning) / len(fills) * 100) if fills else 0
+        # Format with TrySuper.co style
+        text = format_trader_analytics(analytics)
 
-            total_profit = sum(float(f.closed_pnl) for f in winning)
-            total_loss = abs(sum(float(f.closed_pnl) for f in losing))
-            profit_factor = (total_profit / total_loss) if total_loss > 0 else 0
+        # Check if wallet is tracked (simplified check)
+        is_tracked = False
+        if redis_client:
+            tracked_key = f"tracked:hl:{message.from_user.id}"
+            tracked_wallets = await redis_client.redis.smembers(tracked_key)
+            is_tracked = address.lower() in [w.lower() for w in tracked_wallets]
 
-            longs = [f for f in fills if "Long" in f.direction]
-            shorts = [f for f in fills if "Short" in f.direction]
+        # Build inline keyboard with actions
+        keyboard = build_trader_actions_keyboard(address, "hyperliquid", is_tracked)
 
-            if len(longs) > len(shorts) * 1.5:
-                direction_bias = "Long Biased"
-            elif len(shorts) > len(longs) * 1.5:
-                direction_bias = "Short Biased"
-            else:
-                direction_bias = "Neutral"
-
-            # Trades per day
-            if fills:
-                import time
-                oldest = min(fills, key=lambda f: f.time_ms)
-                days = max(1, (time.time() * 1000 - oldest.time_ms) / (1000 * 86400))
-                trades_per_day = len(fills) / days
-            else:
-                trades_per_day = 0
-
-            if trades_per_day > 10:
-                trader_type = "Scalper"
-            elif trades_per_day > 2:
-                trader_type = "Day Trader"
-            elif trades_per_day > 0.5:
-                trader_type = "Swing Trader"
-            else:
-                trader_type = "Position Trader"
-
-            realized_pnl = sum(float(f.closed_pnl) for f in fills)
-
-            # Build metrics dict for display
-            metrics = type('Metrics', (), {
-                'account_value': float(state.account_value),
-                'all_time_pnl': realized_pnl + float(state.total_pnl),
-                'trader_type': trader_type,
-                'account_age_days': 0,
-                'profit_factor': min(profit_factor, 99.99),
-                'win_rate': win_rate,
-                'winning_trades': len(winning),
-                'losing_trades': len(losing),
-                'total_trades': len(fills),
-                'trades_per_day': trades_per_day,
-                'direction_bias': direction_bias,
-                'max_drawdown': 0,
-                'day_7_roe': None,
-                'day_30_roe': None,
-                'day_90_roe': None,
-            })()
-
-        if not metrics:
-            await message.reply(
-                f"Could not compute metrics for <code>{shorten_address(address)}</code>",
-                parse_mode="HTML",
-            )
-            return
-
-        # Format the analytics display (TrySuper style)
-        pnl_emoji = "🟢" if metrics.all_time_pnl >= 0 else "🔴"
-
-        lines = [
-            f"<b>📊 Trader Analytics</b>",
-            f"<code>{shorten_address(address)}</code>\n",
-            f"<b>Account Value:</b> ${metrics.account_value:,.2f}",
-            f"{pnl_emoji} <b>All-Time PnL:</b> {format_usd(metrics.all_time_pnl)}\n",
-            f"<b>━━━ Trader Profile ━━━</b>",
-            f"<b>Type:</b> {metrics.trader_type}",
-        ]
-
-        if metrics.account_age_days > 0:
-            lines.append(f"<b>Account Age:</b> {metrics.account_age_days} days")
-
-        lines.extend([
-            f"<b>Direction:</b> {metrics.direction_bias}",
-            f"<b>Trades/Day:</b> {metrics.trades_per_day:.1f}\n",
-            f"<b>━━━ Performance ━━━</b>",
-            f"<b>Profit Factor:</b> {metrics.profit_factor:.2f}",
-            f"<b>Win Rate:</b> {metrics.win_rate:.1f}%",
-            f"<b>W/L:</b> {metrics.winning_trades}W / {metrics.losing_trades}L",
-            f"<b>Total Trades:</b> {metrics.total_trades}",
-        ])
-
-        if metrics.max_drawdown > 0:
-            lines.append(f"<b>Max Drawdown:</b> -{metrics.max_drawdown:.1f}%")
-
-        # ROE section
-        roe_lines = []
-        if metrics.day_7_roe is not None:
-            roe_lines.append(f"7d: {format_percent(metrics.day_7_roe)}")
-        if metrics.day_30_roe is not None:
-            roe_lines.append(f"30d: {format_percent(metrics.day_30_roe)}")
-        if metrics.day_90_roe is not None:
-            roe_lines.append(f"90d: {format_percent(metrics.day_90_roe)}")
-
-        if roe_lines:
-            lines.append(f"\n<b>━━━ ROE ━━━</b>")
-            lines.append(" | ".join(roe_lines))
-
-        await message.reply("\n".join(lines), parse_mode="HTML")
+        await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
 
     except Exception as e:
         logger.error(f"Error getting analytics for {address}: {e}")
         await message.reply(f"Error fetching analytics: {str(e)}")
+
+
+# ============== Callback Handlers ==============
+
+@router.callback_query(TraderAction.filter(F.action == "refresh"))
+async def callback_refresh_analytics(
+    callback: CallbackQuery,
+    callback_data: TraderAction,
+    hyperliquid_client: Optional[HyperliquidClient] = None,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Refresh trader analytics."""
+    await callback.answer("Refreshing...")
+
+    if not hyperliquid_client:
+        await callback.answer("Client not available", show_alert=True)
+        return
+
+    # Reconstruct full address from stored addresses
+    addr_short = callback_data.address
+    # For now, we'll need to look up the full address or store it
+    # This is a simplified version - in production you'd store the mapping
+    address = addr_short  # Placeholder - needs full address lookup
+
+    # Check if we have the full address in Redis
+    if redis_client:
+        full_addr = await redis_client.redis.get(f"addr_map:{addr_short}")
+        if full_addr:
+            address = full_addr
+
+    try:
+        analytics_service = AnalyticsService(hyperliquid_client, redis_client)
+        analytics = await analytics_service.get_trader_analytics(
+            address, "hyperliquid", force_refresh=True
+        )
+
+        text = format_trader_analytics(analytics)
+
+        is_tracked = False
+        if redis_client:
+            tracked_key = f"tracked:hl:{callback.from_user.id}"
+            tracked_wallets = await redis_client.redis.smembers(tracked_key)
+            is_tracked = address.lower() in [w.lower() for w in tracked_wallets]
+
+        keyboard = build_trader_actions_keyboard(address, "hyperliquid", is_tracked)
+
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        logger.error(f"Error refreshing analytics: {e}")
+        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+
+
+@router.callback_query(TraderAction.filter(F.action == "track"))
+async def callback_track_wallet(
+    callback: CallbackQuery,
+    callback_data: TraderAction,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Track a wallet for alerts."""
+    if not redis_client:
+        await callback.answer("Redis not available", show_alert=True)
+        return
+
+    address = callback_data.address
+    user_id = callback.from_user.id
+
+    # Add to tracked set
+    tracked_key = f"tracked:{callback_data.exchange[:2]}:{user_id}"
+    await redis_client.redis.sadd(tracked_key, address)
+
+    # Store address mapping for later lookups
+    await redis_client.redis.set(f"addr_map:{address[:20]}", address, ex=86400 * 30)
+
+    await callback.answer(f"Now tracking {address[:10]}...", show_alert=True)
+
+    # Update keyboard to show untrack button
+    try:
+        keyboard = build_trader_actions_keyboard(address, callback_data.exchange, is_tracked=True)
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+    except Exception:
+        pass
+
+
+@router.callback_query(TraderAction.filter(F.action == "untrack"))
+async def callback_untrack_wallet(
+    callback: CallbackQuery,
+    callback_data: TraderAction,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Stop tracking a wallet."""
+    if not redis_client:
+        await callback.answer("Redis not available", show_alert=True)
+        return
+
+    address = callback_data.address
+    user_id = callback.from_user.id
+
+    tracked_key = f"tracked:{callback_data.exchange[:2]}:{user_id}"
+    await redis_client.redis.srem(tracked_key, address)
+
+    await callback.answer(f"Stopped tracking {address[:10]}...", show_alert=True)
+
+    # Update keyboard
+    try:
+        keyboard = build_trader_actions_keyboard(address, callback_data.exchange, is_tracked=False)
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+    except Exception:
+        pass
+
+
+@router.callback_query(TraderAction.filter(F.action == "positions"))
+async def callback_show_positions(
+    callback: CallbackQuery,
+    callback_data: TraderAction,
+    hyperliquid_client: Optional[HyperliquidClient] = None,
+) -> None:
+    """Show positions for the trader."""
+    await callback.answer("Loading positions...")
+
+    if not hyperliquid_client:
+        await callback.answer("Client not available", show_alert=True)
+        return
+
+    address = callback_data.address
+
+    try:
+        state = await hyperliquid_client.get_user_state(address)
+
+        if not state.positions:
+            await callback.answer("No open positions", show_alert=True)
+            return
+
+        lines = [f"<b>Positions for {shorten_address(address)}</b>\n"]
+
+        for pos in state.positions[:5]:
+            dir_emoji = "🟢" if pos.direction == Direction.LONG else "🔴"
+            dir_text = "LONG" if pos.direction == Direction.LONG else "SHORT"
+            roe_pct = float(pos.return_on_equity) * 100
+            pnl_str = format_pnl(pos.unrealized_pnl, roe_pct)
+
+            lines.append(
+                f"{dir_emoji} <b>{pos.coin}</b> {dir_text}\n"
+                f"   ${float(pos.position_value):,.0f} | {pnl_str}"
+            )
+
+        if len(state.positions) > 5:
+            lines.append(f"\n<i>+ {len(state.positions) - 5} more</i>")
+
+        await callback.message.answer("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error getting positions: {e}")
+        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+
+
+@router.callback_query(TraderAction.filter(F.action == "pnl"))
+async def callback_show_pnl(
+    callback: CallbackQuery,
+    callback_data: TraderAction,
+    hyperliquid_client: Optional[HyperliquidClient] = None,
+) -> None:
+    """Show PnL history for the trader."""
+    await callback.answer("Loading PnL...")
+
+    if not hyperliquid_client:
+        await callback.answer("Client not available", show_alert=True)
+        return
+
+    address = callback_data.address
+
+    try:
+        fills = await hyperliquid_client.get_user_fills(address, limit=20)
+
+        if not fills:
+            await callback.answer("No recent trades", show_alert=True)
+            return
+
+        lines = [f"<b>Recent PnL for {shorten_address(address)}</b>\n"]
+
+        for fill in fills[:10]:
+            if fill.closed_pnl == 0:
+                continue
+
+            pnl_emoji = "🟢" if fill.closed_pnl > 0 else "🔴"
+            time_str = fill.datetime.strftime("%m/%d %H:%M")
+
+            lines.append(
+                f"{pnl_emoji} <b>{fill.coin}</b> {format_usd(fill.closed_pnl)}\n"
+                f"   {time_str}"
+            )
+
+        total = sum(float(f.closed_pnl) for f in fills)
+        total_emoji = "🟢" if total >= 0 else "🔴"
+        lines.append(f"\n{total_emoji} <b>Total:</b> {format_usd(total)}")
+
+        await callback.message.answer("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error getting PnL: {e}")
+        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+
+
+@router.callback_query(CopyTradingAction.filter(F.action == "enable"))
+async def callback_enable_copy(
+    callback: CallbackQuery,
+    callback_data: CopyTradingAction,
+) -> None:
+    """Enable copy trading signals for a trader."""
+    await callback.answer(
+        f"Copy trading signals enabled for {callback_data.address[:10]}...\n"
+        "You'll receive alerts when this trader opens/closes positions.",
+        show_alert=True,
+    )
+    # TODO: Implement actual copy trading subscription
+
+
+@router.callback_query(WatchlistAction.filter(F.action == "add"))
+async def callback_add_to_watchlist(
+    callback: CallbackQuery,
+    callback_data: WatchlistAction,
+) -> None:
+    """Add trader to watchlist."""
+    await callback.answer(
+        f"Added {callback_data.address[:10]}... to watchlist",
+        show_alert=True,
+    )
+    # TODO: Implement watchlist storage

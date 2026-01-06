@@ -14,7 +14,11 @@ from bot.services.wallet_service import WalletService
 from bot.services.notification_service import NotificationService
 from bot.services.position_indexer import PositionIndexer
 from bot.services.whale_detector import ConfigurableWhaleDetector
-from bot.routers import general, tracking, polymarket, hyperliquid
+from bot.services.analytics_service import AnalyticsService
+from bot.services.copy_trading_service import CopyTradingService
+from bot.routers import general, tracking, polymarket, hyperliquid, settings
+from bot.middlewares import RateLimitMiddleware, ThrottleMiddleware
+from bot.schedulers import MarketMonitorScheduler
 from indexers.polymarket import PolymarketIndexer
 from indexers.hyperliquid import HyperliquidClient
 
@@ -81,8 +85,28 @@ async def main() -> None:
     # Initialize configurable whale detector
     whale_detector = ConfigurableWhaleDetector(redis_client=redis_client)
 
+    # Initialize analytics service
+    analytics_service = AnalyticsService(
+        hl_client=hyperliquid_client,
+        redis=redis_client,
+    )
+
+    # Initialize copy trading service
+    copy_trading_service = CopyTradingService(redis=redis_client)
+
+    # Initialize market monitor scheduler
+    market_scheduler = MarketMonitorScheduler(
+        redis=redis_client,
+        bot=bot,
+    )
+
     # Initialize dispatcher with services in workflow_data
     dp = Dispatcher()
+
+    # Register middlewares
+    dp.message.middleware(ThrottleMiddleware(limit=0.5))
+    dp.message.middleware(RateLimitMiddleware(redis_client))
+    dp.callback_query.middleware(RateLimitMiddleware(redis_client))
 
     # Store services in dispatcher's workflow_data for access from handlers
     dp["redis_client"] = redis_client
@@ -92,6 +116,9 @@ async def main() -> None:
     dp["polymarket_indexer"] = polymarket_indexer
     dp["position_indexer"] = position_indexer
     dp["whale_detector"] = whale_detector
+    dp["analytics_service"] = analytics_service
+    dp["copy_trading_service"] = copy_trading_service
+    dp["market_scheduler"] = market_scheduler
     dp["config"] = config
 
     # Register routers
@@ -99,6 +126,7 @@ async def main() -> None:
     dp.include_router(tracking.router)
     dp.include_router(polymarket.router)
     dp.include_router(hyperliquid.router)
+    dp.include_router(settings.router)
 
     # Startup handler
     @dp.startup()
@@ -115,10 +143,16 @@ async def main() -> None:
         # Start Position indexer
         await position_indexer.start()
 
+        # Start market monitor scheduler
+        await market_scheduler.start()
+        await market_scheduler.restore_user_jobs()
+
     # Shutdown handler
     @dp.shutdown()
     async def on_shutdown() -> None:
         logger.info("Shutting down...")
+        # Stop scheduler
+        await market_scheduler.stop()
         # Stop indexers
         await polymarket_indexer.stop()
         await position_indexer.stop()
