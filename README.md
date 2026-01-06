@@ -11,6 +11,10 @@ A multi-exchange whale tracking platform with both CLI and Telegram interfaces.
 - **Whale Alerts** - Automatic alerts for large trades ($10k+ on Polymarket)
 - **PnL Tracking** - View performance metrics for any wallet
 - **Wallet Groups** - Organize tracked wallets into groups
+- **Trader Analytics** - TrySuper.co-style metrics (Profit Factor, ROE, Win Rate, Max Drawdown)
+- **Copy Trading Signals** - Get signals when tracked wallets trade
+- **Configurable Whale Detection** - Customize thresholds per user
+- **Rate Limiting** - Built-in protection against API abuse
 
 ## Quick Start
 
@@ -78,7 +82,15 @@ Keyboard controls:
 - `W` - Whales tab (both exchanges)
 - `A` - All exchanges
 - `/` - Search/filter mode
+- `↑/↓` - Scroll one row
+- `←/→` - Scroll one page (10 rows)
 - `Q` - Quit
+
+**Single Exchange Mode**
+```bash
+python -m cli.simple --hl    # Hyperliquid only
+python -m cli.simple --pm    # Polymarket only
+```
 
 **One-off Commands**
 ```bash
@@ -173,7 +185,19 @@ btc >500k       Combined filters
 /hl_sentiment <coin>           - Market sentiment
 /hl_market <coin>              - Market info
 /hl_coins                      - List available coins
-/hl_analytics <address>        - Trader analytics
+/hl_fills <address>            - Recent fills for address
+/hl_analytics <address>        - Trader analytics (TrySuper.co style)
+```
+
+**Settings & Configuration**
+```
+/settings                      - View all settings
+/whale_config                  - Configure whale detection thresholds
+/setinterval <exchange> <sec>  - Set monitoring interval
+/intervals                     - View current intervals
+/notify <all|whale_only|none>  - Set notification preferences
+/mute <minutes>                - Mute notifications temporarily
+/unmute                        - Unmute notifications
 ```
 
 **Filter Examples**
@@ -211,17 +235,29 @@ printdao/
 ├── bot/
 │   ├── main.py              # Telegram bot entry point
 │   ├── config.py            # Configuration
-│   ├── routers/             # Command handlers
-│   ├── services/            # Business logic
+│   ├── routers/
+│   │   ├── general.py       # /start, /help commands
+│   │   ├── tracking.py      # /track, /untrack, wallet groups
+│   │   ├── polymarket.py    # /pm_* commands
+│   │   ├── hyperliquid.py   # /hl_* commands
+│   │   └── settings.py      # /settings, /whale_config
+│   ├── services/
+│   │   ├── analytics_service.py    # Trader metrics calculations
+│   │   ├── copy_trading_service.py # Copy trading signals
+│   │   ├── wallet_service.py       # Wallet tracking
+│   │   └── notification_service.py # Alert delivery
+│   ├── keyboards/           # Inline keyboard builders
+│   ├── middlewares/         # Rate limiting, throttling
+│   ├── schedulers/          # Background job scheduling
 │   └── storage/             # Redis client & models
 ├── indexers/                # Exchange integrations
 │   ├── hyperliquid/
-│   └── polymarket/          # Polymarket API client & tracker
+│   └── polymarket/
 ├── shared/                  # Shared utilities
 ├── tests/                   # Test files
 ├── docker-compose.yml       # Docker services
 ├── requirements.txt         # Python dependencies
-└── .env                     # Configuration (create from .env.example)
+└── .env                     # Configuration
 ```
 
 ## Development
