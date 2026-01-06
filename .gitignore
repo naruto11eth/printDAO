@@ -3,6 +3,7 @@
 /docs/
 .env
 .env.local
+.env.example
 .bahn.toml
 
 # Python
