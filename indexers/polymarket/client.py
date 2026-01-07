@@ -40,7 +40,7 @@ class PolymarketClient:
     def __init__(
         self,
         calls_per_second: float = 5.0,
-        timeout: float = 30.0,
+        timeout: float = 60.0,  # Gamma API can be slow
     ):
         self.rate_limiter = RateLimiter(calls_per_second)
         self.timeout = aiohttp.ClientTimeout(total=timeout)
@@ -369,34 +369,52 @@ class PolymarketClient:
         self,
         active: bool = True,
         closed: bool = False,
+        archived: bool = False,
         order_by: str = "liquidity",
+        ascending: bool = False,
         limit: int = 20,
         offset: int = 0,
         tag_slug: Optional[str] = None,
+        liquidity_min: Optional[float] = 10000.0,
+        volume_min: Optional[float] = None,
     ) -> list[Market]:
         """Get markets from Gamma API sorted by liquidity/volume.
 
         Args:
-            active: Filter for active markets
-            closed: Filter for closed markets
+            active: Filter for active markets only
+            closed: Include closed markets
+            archived: Include archived markets
             order_by: Sort field (liquidity, volume, volume24hr)
+            ascending: Sort ascending (False = highest first)
             limit: Results per page
             offset: Pagination offset
-            tag_slug: Filter by tag/category
+            tag_slug: Filter by tag/category (note: API filtering unreliable)
+            liquidity_min: Minimum liquidity in USD (filters out spam)
+            volume_min: Minimum volume in USD
 
         Returns:
-            List of Market objects
+            List of Market objects sorted by liquidity
         """
+        # Fetch extra to ensure good sorting after client-side filter
+        fetch_limit = min(limit * 2, 100)
+
         params = {
-            "limit": min(limit, 100),
+            "limit": fetch_limit,
             "offset": offset,
             "active": str(active).lower(),
             "closed": str(closed).lower(),
-            "order": order_by,
+            "archived": str(archived).lower(),
         }
 
-        if tag_slug:
-            params["tag_slug"] = tag_slug
+        # Note: tag_slug filtering is unreliable on API side
+        # We skip it and do client-side filtering if needed
+
+        # Filter out low liquidity/spam markets
+        if liquidity_min is not None:
+            params["liquidity_num_min"] = liquidity_min
+
+        if volume_min is not None:
+            params["volume_num_min"] = volume_min
 
         url = f"{self.GAMMA_URL}/markets"
         data = await self._request("GET", url, params)
@@ -404,47 +422,73 @@ class PolymarketClient:
         if not isinstance(data, list):
             return []
 
-        return [Market.from_api(item) for item in data]
+        markets = [Market.from_api(item) for item in data]
+
+        # Client-side sorting (API ordering is unreliable)
+        if order_by == "liquidity":
+            markets.sort(key=lambda m: m.liquidity, reverse=not ascending)
+        elif order_by == "volume":
+            markets.sort(key=lambda m: m.volume, reverse=not ascending)
+        elif order_by == "volume24hr":
+            markets.sort(key=lambda m: m.volume_24h, reverse=not ascending)
+
+        return markets[:limit]
 
     async def search_markets(
         self,
         query: str,
         limit: int = 20,
+        active_only: bool = True,
+        liquidity_min: float = 1000.0,
     ) -> list[Market]:
-        """Search markets by name/description.
+        """Search markets by name/description (client-side filtering).
 
         Args:
-            query: Search query
+            query: Search query (searches question text)
             limit: Max results
+            active_only: Only return active markets
+            liquidity_min: Minimum liquidity to include
 
         Returns:
-            List of matching Market objects
+            List of matching Market objects sorted by liquidity
         """
+        # Fetch markets with decent liquidity, filter client-side
+        # Note: API search params don't work reliably
         params = {
-            "query": query,
-            "limit": min(limit, 100),
+            "limit": 100,  # Fetch max to search through
+            "liquidity_num_min": liquidity_min,
         }
 
-        url = f"{self.GAMMA_URL}/search"
+        if active_only:
+            params["active"] = "true"
+            params["closed"] = "false"
+            params["archived"] = "false"
+
+        url = f"{self.GAMMA_URL}/markets"
         data = await self._request("GET", url, params)
 
-        # Search returns events, extract markets
-        if not data:
+        if not isinstance(data, list):
             return []
 
-        # If search returns markets directly
-        if isinstance(data, list):
-            markets = []
-            for item in data:
-                # Handle both market and event responses
-                if "question" in item:
-                    markets.append(Market.from_api(item))
-                elif "markets" in item:
-                    for m in item.get("markets", []):
-                        markets.append(Market.from_api(m))
-            return markets[:limit]
+        # Client-side search and filter
+        query_lower = query.lower()
+        question_matches = []
+        description_matches = []
 
-        return []
+        for item in data:
+            market = Market.from_api(item)
+            # Prioritize question matches over description matches
+            if query_lower in market.question.lower():
+                question_matches.append(market)
+            elif query_lower in market.description.lower():
+                description_matches.append(market)
+
+        # Sort each group by liquidity, then combine (question matches first)
+        question_matches.sort(key=lambda m: m.liquidity, reverse=True)
+        description_matches.sort(key=lambda m: m.liquidity, reverse=True)
+        markets = question_matches + description_matches
+
+        return markets[:limit]
 
     async def get_market_by_slug(
         self,
@@ -527,20 +571,26 @@ class PolymarketClient:
         self,
         active: bool = True,
         closed: bool = False,
+        archived: bool = False,
         order_by: str = "liquidity",
+        ascending: bool = False,
         limit: int = 20,
         offset: int = 0,
         tag_slug: Optional[str] = None,
+        liquidity_min: Optional[float] = 10000.0,
     ) -> list[dict]:
         """Get events from Gamma API.
 
         Args:
             active: Filter for active events
-            closed: Filter for closed events
+            closed: Include closed events
+            archived: Include archived events
             order_by: Sort field
+            ascending: Sort ascending
             limit: Results per page
             offset: Pagination offset
             tag_slug: Filter by tag
+            liquidity_min: Minimum liquidity in USD
 
         Returns:
             List of event dicts
@@ -550,11 +600,16 @@ class PolymarketClient:
             "offset": offset,
             "active": str(active).lower(),
             "closed": str(closed).lower(),
+            "archived": str(archived).lower(),
             "order": order_by,
+            "ascending": str(ascending).lower(),
         }
 
         if tag_slug:
             params["tag_slug"] = tag_slug
+
+        if liquidity_min is not None:
+            params["liquidity_num_min"] = liquidity_min
 
         url = f"{self.GAMMA_URL}/events"
         data = await self._request("GET", url, params)
