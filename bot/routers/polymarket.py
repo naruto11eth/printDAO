@@ -3,14 +3,31 @@
 import logging
 from typing import Optional, List, Dict, Any
 
-from aiogram import Router
-from aiogram.types import Message
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 from shared.utils import shorten_address, is_valid_ethereum_address
-from indexers.polymarket import PolymarketIndexer, Position
+from indexers.polymarket import PolymarketIndexer, Position, Market, Tag, MarketHolder
+from indexers.polymarket.client import PolymarketClient
 from bot.utils.filters import parse_filter_args, format_filter_summary
 from bot.storage.redis_client import RedisClient
+from bot.keyboards.polymarket_menu import (
+    PMMenuAction,
+    PMMarketAction,
+    PMCategoryAction,
+    PMSearchAction,
+    build_pm_main_menu,
+    build_pm_top_markets,
+    build_pm_market_detail,
+    build_pm_positions_keyboard,
+    build_pm_categories,
+    build_pm_category_markets,
+    build_pm_search_results,
+    build_pm_news_keyboard,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -505,3 +522,637 @@ async def cmd_pm_unsubscribe(
     except Exception as e:
         logger.error(f"Error unsubscribing from whales: {e}")
         await message.reply(f"Error: {str(e)}")
+
+
+# ==================== FSM States ====================
+
+
+class PMSearchState(StatesGroup):
+    """States for search flow."""
+
+    waiting_for_query = State()
+
+
+# ==================== Helper Functions ====================
+
+
+def format_market_list(markets: list[Market], start_num: int = 1) -> str:
+    """Format markets for display in list view."""
+    lines = []
+    for i, market in enumerate(markets, start_num):
+        # Truncate question
+        question = market.question[:50] + "..." if len(market.question) > 50 else market.question
+
+        # Format prices
+        yes_pct = int(market.yes_price * 100)
+        no_pct = int(market.no_price * 100)
+
+        lines.append(
+            f"<b>{i}.</b> {question}\n"
+            f"   💰 {market.format_liquidity()} | YES {yes_pct}% | NO {no_pct}%"
+        )
+
+    return "\n\n".join(lines)
+
+
+def format_market_detail(market: Market) -> str:
+    """Format single market for detail view."""
+    # Format prices
+    yes_pct = int(market.yes_price * 100)
+    no_pct = int(market.no_price * 100)
+
+    # Format volume
+    if market.volume_24h >= 1_000_000:
+        vol_str = f"${market.volume_24h / 1_000_000:.2f}M"
+    elif market.volume_24h >= 1_000:
+        vol_str = f"${market.volume_24h / 1_000:.1f}K"
+    else:
+        vol_str = f"${market.volume_24h:.0f}"
+
+    # Format open interest
+    if market.open_interest >= 1_000_000:
+        oi_str = f"${market.open_interest / 1_000_000:.2f}M"
+    elif market.open_interest >= 1_000:
+        oi_str = f"${market.open_interest / 1_000:.1f}K"
+    else:
+        oi_str = f"${market.open_interest:.0f}"
+
+    lines = [
+        f"📈 <b>{market.question}</b>\n",
+        f"💰 <b>Liquidity:</b> {market.format_liquidity()}",
+        f"📊 <b>Volume (24h):</b> {vol_str}",
+        f"📈 <b>Open Interest:</b> {oi_str}\n",
+        f"<b>Current Prices:</b>",
+        f"  YES: {yes_pct}¢ (${market.yes_price:.2f})",
+        f"  NO: {no_pct}¢ (${market.no_price:.2f})",
+    ]
+
+    if market.end_date:
+        lines.append(f"\n⏰ <b>Closes:</b> {market.end_date[:10]}")
+
+    if market.tags:
+        tags_str = ", ".join(market.tags[:3])
+        lines.append(f"🏷️ <b>Tags:</b> {tags_str}")
+
+    return "\n".join(lines)
+
+
+# ==================== Menu Commands ====================
+
+
+@router.message(Command("pm"))
+@router.message(Command("pm_menu"))
+async def cmd_pm_menu(message: Message) -> None:
+    """Show main Polymarket menu."""
+    text = (
+        "📊 <b>Polymarket Menu</b>\n\n"
+        "Browse prediction markets with liquidity, search, and real-time news."
+    )
+
+    keyboard = build_pm_main_menu()
+    await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.message(Command("pm_top"))
+async def cmd_pm_top(
+    message: Message,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+) -> None:
+    """Show top markets by liquidity."""
+    if not polymarket_indexer:
+        await message.reply("Polymarket is not available.")
+        return
+
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    try:
+        client = polymarket_indexer.client
+        markets = await client.get_markets(active=True, order_by="liquidity", limit=10)
+
+        if not markets:
+            await message.reply("No markets found.")
+            return
+
+        text = "🔥 <b>Top Markets by Liquidity</b>\n\n" + format_market_list(markets)
+        keyboard = build_pm_top_markets(markets, page=0)
+
+        await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"Error getting top markets: {e}")
+        await message.reply(f"Error: {str(e)}")
+
+
+@router.message(Command("pm_search"))
+async def cmd_pm_search(
+    message: Message,
+    command: CommandObject,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+    state: FSMContext = None,
+) -> None:
+    """Search markets by keyword.
+
+    Usage: /pm_search <query>
+    """
+    if not polymarket_indexer:
+        await message.reply("Polymarket is not available.")
+        return
+
+    if not command.args:
+        await message.reply(
+            "<b>Usage:</b> /pm_search &lt;query&gt;\n\n"
+            "<b>Examples:</b>\n"
+            "<code>/pm_search trump</code>\n"
+            "<code>/pm_search bitcoin</code>\n"
+            "<code>/pm_search election 2024</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    query = command.args.strip()
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    try:
+        client = polymarket_indexer.client
+        markets = await client.search_markets(query, limit=10)
+
+        if not markets:
+            await message.reply(f"No markets found for: <b>{query}</b>", parse_mode="HTML")
+            return
+
+        text = f"🔍 <b>Search Results: {query}</b>\n\n" + format_market_list(markets)
+        keyboard = build_pm_search_results(markets, query, page=0)
+
+        await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"Error searching markets: {e}")
+        await message.reply(f"Error: {str(e)}")
+
+
+@router.message(Command("pm_market"))
+async def cmd_pm_market(
+    message: Message,
+    command: CommandObject,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+) -> None:
+    """Show market details.
+
+    Usage: /pm_market <slug or condition_id>
+    """
+    if not polymarket_indexer:
+        await message.reply("Polymarket is not available.")
+        return
+
+    if not command.args:
+        await message.reply(
+            "<b>Usage:</b> /pm_market &lt;slug&gt;\n\n"
+            "<b>Example:</b>\n"
+            "<code>/pm_market will-trump-win-2024</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    identifier = command.args.strip()
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    try:
+        client = polymarket_indexer.client
+
+        # Try slug first, then condition_id
+        market = await client.get_market_by_slug(identifier)
+        if not market:
+            market = await client.get_market_by_condition_id(identifier)
+
+        if not market:
+            await message.reply(f"Market not found: <b>{identifier}</b>", parse_mode="HTML")
+            return
+
+        text = format_market_detail(market)
+        keyboard = build_pm_market_detail(market)
+
+        await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"Error getting market: {e}")
+        await message.reply(f"Error: {str(e)}")
+
+
+# ==================== Callback Handlers ====================
+
+
+@router.callback_query(PMMenuAction.filter(F.action == "top"))
+async def callback_pm_top_markets(
+    callback: CallbackQuery,
+    callback_data: PMMenuAction,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+) -> None:
+    """Show top markets with pagination."""
+    await callback.answer()
+
+    if not polymarket_indexer:
+        await callback.answer("Polymarket not available", show_alert=True)
+        return
+
+    page = callback_data.page
+    per_page = 10
+    offset = page * per_page
+
+    try:
+        client = polymarket_indexer.client
+        markets = await client.get_markets(active=True, order_by="liquidity", limit=per_page, offset=offset)
+
+        if not markets:
+            await callback.answer("No more markets", show_alert=True)
+            return
+
+        start_num = offset + 1
+        text = f"🔥 <b>Top Markets by Liquidity</b> (Page {page + 1})\n\n" + format_market_list(markets, start_num)
+        keyboard = build_pm_top_markets(markets, page=page)
+
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"Error getting top markets: {e}")
+        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+
+
+@router.callback_query(PMMenuAction.filter(F.action == "search"))
+async def callback_pm_search_prompt(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """Prompt for search query."""
+    await callback.answer()
+
+    text = (
+        "🔍 <b>Search Markets</b>\n\n"
+        "Send me a search query (e.g., 'trump', 'bitcoin', 'election').\n\n"
+        "Or use: /pm_search &lt;query&gt;"
+    )
+
+    await callback.message.edit_text(text, parse_mode="HTML")
+    await state.set_state(PMSearchState.waiting_for_query)
+
+
+@router.message(PMSearchState.waiting_for_query)
+async def process_search_query(
+    message: Message,
+    state: FSMContext,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+) -> None:
+    """Process search query from FSM state."""
+    await state.clear()
+
+    if not polymarket_indexer:
+        await message.reply("Polymarket is not available.")
+        return
+
+    query = message.text.strip()
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    try:
+        client = polymarket_indexer.client
+        markets = await client.search_markets(query, limit=10)
+
+        if not markets:
+            text = f"No markets found for: <b>{query}</b>\n\nTry a different search term."
+            keyboard = build_pm_main_menu()
+            await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
+            return
+
+        text = f"🔍 <b>Search Results: {query}</b>\n\n" + format_market_list(markets)
+        keyboard = build_pm_search_results(markets, query, page=0)
+
+        await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"Error searching markets: {e}")
+        await message.reply(f"Error: {str(e)}")
+
+
+@router.callback_query(PMMenuAction.filter(F.action == "categories"))
+async def callback_pm_categories(
+    callback: CallbackQuery,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+) -> None:
+    """Show category list."""
+    await callback.answer()
+
+    if not polymarket_indexer:
+        await callback.answer("Polymarket not available", show_alert=True)
+        return
+
+    try:
+        client = polymarket_indexer.client
+        tags = await client.get_tags()
+
+        if not tags:
+            # Use default categories
+            tags = [
+                Tag(id="1", slug="politics", label="Politics"),
+                Tag(id="2", slug="crypto", label="Crypto"),
+                Tag(id="3", slug="sports", label="Sports"),
+                Tag(id="4", slug="entertainment", label="Entertainment"),
+                Tag(id="5", slug="finance", label="Finance"),
+            ]
+
+        text = "📁 <b>Browse by Category</b>\n\nSelect a category to see markets:"
+        keyboard = build_pm_categories(tags)
+
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"Error getting categories: {e}")
+        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+
+
+@router.callback_query(PMMenuAction.filter(F.action == "refresh"))
+async def callback_pm_refresh(callback: CallbackQuery) -> None:
+    """Refresh main menu."""
+    await callback.answer("Refreshed!")
+
+    text = (
+        "📊 <b>Polymarket Menu</b>\n\n"
+        "Browse prediction markets with liquidity, search, and real-time news."
+    )
+
+    keyboard = build_pm_main_menu()
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.callback_query(PMMenuAction.filter(F.action == "back"))
+async def callback_pm_back_to_menu(callback: CallbackQuery) -> None:
+    """Go back to main menu."""
+    await callback.answer()
+
+    text = (
+        "📊 <b>Polymarket Menu</b>\n\n"
+        "Browse prediction markets with liquidity, search, and real-time news."
+    )
+
+    keyboard = build_pm_main_menu()
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.callback_query(PMCategoryAction.filter(F.action == "select"))
+async def callback_pm_category_select(
+    callback: CallbackQuery,
+    callback_data: PMCategoryAction,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+) -> None:
+    """Show markets in selected category."""
+    await callback.answer()
+
+    if not polymarket_indexer:
+        await callback.answer("Polymarket not available", show_alert=True)
+        return
+
+    tag_slug = callback_data.tag_slug
+    page = callback_data.page
+    per_page = 10
+    offset = page * per_page
+
+    try:
+        client = polymarket_indexer.client
+        markets = await client.get_markets(
+            active=True,
+            order_by="liquidity",
+            limit=per_page,
+            offset=offset,
+            tag_slug=tag_slug,
+        )
+
+        if not markets:
+            await callback.answer(f"No markets in {tag_slug}", show_alert=True)
+            return
+
+        start_num = offset + 1
+        text = f"📁 <b>{tag_slug.title()} Markets</b> (Page {page + 1})\n\n" + format_market_list(markets, start_num)
+        keyboard = build_pm_category_markets(markets, tag_slug, page=page)
+
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"Error getting category markets: {e}")
+        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+
+
+@router.callback_query(PMMarketAction.filter(F.action == "view"))
+async def callback_pm_market_view(
+    callback: CallbackQuery,
+    callback_data: PMMarketAction,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Show market detail view."""
+    await callback.answer("Loading market...")
+
+    if not polymarket_indexer:
+        await callback.answer("Polymarket not available", show_alert=True)
+        return
+
+    market_id = callback_data.market_id
+    page = callback_data.page
+
+    try:
+        client = polymarket_indexer.client
+
+        # Look up full market ID from Redis if available
+        full_id = market_id
+        if redis_client:
+            cached_id = await redis_client.redis.get(f"pm:market_id:{market_id}")
+            if cached_id:
+                full_id = cached_id
+
+        # Try to get market by condition_id or slug
+        market = await client.get_market_by_condition_id(full_id)
+        if not market:
+            market = await client.get_market_by_slug(full_id)
+
+        if not market:
+            await callback.answer("Market not found", show_alert=True)
+            return
+
+        # Cache the mapping
+        if redis_client and market.condition_id:
+            await redis_client.redis.set(
+                f"pm:market_id:{market_id}",
+                market.condition_id,
+                ex=86400,
+            )
+
+        text = format_market_detail(market)
+        keyboard = build_pm_market_detail(market, page)
+
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"Error viewing market: {e}")
+        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+
+
+@router.callback_query(PMMarketAction.filter(F.action == "positions"))
+async def callback_pm_market_positions(
+    callback: CallbackQuery,
+    callback_data: PMMarketAction,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Show market positions/holders."""
+    await callback.answer("Loading positions...")
+
+    if not polymarket_indexer:
+        await callback.answer("Polymarket not available", show_alert=True)
+        return
+
+    market_id = callback_data.market_id
+    page = callback_data.page
+
+    try:
+        client = polymarket_indexer.client
+
+        # Get full ID from cache
+        full_id = market_id
+        if redis_client:
+            cached_id = await redis_client.redis.get(f"pm:market_id:{market_id}")
+            if cached_id:
+                full_id = cached_id
+
+        # Get positions
+        holders = await client.get_market_positions(full_id, limit=20)
+
+        if not holders:
+            await callback.answer("No positions found", show_alert=True)
+            return
+
+        # Group by outcome
+        yes_holders = [h for h in holders if h.outcome.lower() == "yes"]
+        no_holders = [h for h in holders if h.outcome.lower() == "no"]
+
+        lines = ["👥 <b>Top Positions</b>\n"]
+
+        if yes_holders:
+            lines.append("<b>YES Holders:</b>")
+            for i, h in enumerate(yes_holders[:5], 1):
+                addr_short = shorten_address(h.address)
+                lines.append(f"{i}. {addr_short} - ${h.value:,.0f}")
+
+        if no_holders:
+            lines.append("\n<b>NO Holders:</b>")
+            for i, h in enumerate(no_holders[:5], 1):
+                addr_short = shorten_address(h.address)
+                lines.append(f"{i}. {addr_short} - ${h.value:,.0f}")
+
+        text = "\n".join(lines)
+        keyboard = build_pm_positions_keyboard(market_id, page)
+
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"Error getting positions: {e}")
+        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+
+
+@router.callback_query(PMMarketAction.filter(F.action == "news"))
+async def callback_pm_market_news(
+    callback: CallbackQuery,
+    callback_data: PMMarketAction,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Show news about market topic."""
+    await callback.answer("Fetching news...")
+
+    if not polymarket_indexer:
+        await callback.answer("Polymarket not available", show_alert=True)
+        return
+
+    market_id = callback_data.market_id
+    page = callback_data.page
+
+    try:
+        client = polymarket_indexer.client
+
+        # Get market to extract topic
+        full_id = market_id
+        if redis_client:
+            cached_id = await redis_client.redis.get(f"pm:market_id:{market_id}")
+            if cached_id:
+                full_id = cached_id
+
+        market = await client.get_market_by_condition_id(full_id)
+        if not market:
+            market = await client.get_market_by_slug(full_id)
+
+        if not market:
+            await callback.answer("Market not found", show_alert=True)
+            return
+
+        # Extract key terms from market question
+        question = market.question
+        # Simple extraction - first few meaningful words
+        words = [w for w in question.split() if len(w) > 3 and w.lower() not in ("will", "what", "when", "does", "the", "for")][:3]
+        topic = " ".join(words)
+        topic_google = topic.replace(" ", "+")
+        topic_twitter = topic.replace(" ", "%20")
+
+        # For now, show placeholder - real news would require web search integration
+        lines = [
+            f"📰 <b>News: {topic}</b>\n",
+            "━━━━━━━━━━━━━━━━━━━━\n",
+            "<i>News integration coming soon!</i>\n",
+            f"Search for '{topic}' news:",
+            f"• <a href='https://news.google.com/search?q={topic_google}'>Google News</a>",
+            f"• <a href='https://twitter.com/search?q={topic_twitter}'>X/Twitter</a>",
+        ]
+
+        text = "\n".join(lines)
+        keyboard = build_pm_news_keyboard(market_id, page)
+
+        await callback.message.edit_text(
+            text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True
+        )
+
+    except Exception as e:
+        logger.error(f"Error getting news: {e}")
+        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
+
+
+@router.callback_query(PMSearchAction.filter(F.action == "results"))
+async def callback_pm_search_paginate(
+    callback: CallbackQuery,
+    callback_data: PMSearchAction,
+    polymarket_indexer: Optional[PolymarketIndexer] = None,
+) -> None:
+    """Paginate search results."""
+    await callback.answer()
+
+    if not polymarket_indexer:
+        await callback.answer("Polymarket not available", show_alert=True)
+        return
+
+    query = callback_data.query
+    page = callback_data.page
+    per_page = 10
+    offset = page * per_page
+
+    try:
+        client = polymarket_indexer.client
+        # Note: Search doesn't support offset, so we fetch more and slice
+        markets = await client.search_markets(query, limit=100)
+        markets = markets[offset : offset + per_page]
+
+        if not markets:
+            await callback.answer("No more results", show_alert=True)
+            return
+
+        start_num = offset + 1
+        text = f"🔍 <b>Search: {query}</b> (Page {page + 1})\n\n" + format_market_list(markets, start_num)
+        keyboard = build_pm_search_results(markets, query, page=page)
+
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"Error paginating search: {e}")
+        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
