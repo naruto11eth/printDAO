@@ -242,3 +242,134 @@ class PnLSummary:
     def is_profitable(self) -> bool:
         """Check if overall profitable."""
         return self.total_pnl > 0
+
+
+@dataclass
+class Tag:
+    """Category/tag for markets."""
+    id: str
+    slug: str
+    label: str
+
+    @classmethod
+    def from_api(cls, data: dict) -> "Tag":
+        """Create Tag from API response."""
+        return cls(
+            id=str(data.get("id", "")),
+            slug=data.get("slug", ""),
+            label=data.get("label", data.get("slug", "")),
+        )
+
+
+@dataclass
+class Market:
+    """A Polymarket market from Gamma API."""
+    condition_id: str
+    question: str
+    description: str
+    slug: str
+    liquidity: float
+    volume: float
+    volume_24h: float
+    open_interest: float
+    outcome_prices: list[float]  # [yes_price, no_price]
+    outcomes: list[str]  # ["Yes", "No"]
+    end_date: Optional[str]
+    active: bool
+    closed: bool
+    tags: list[str] = field(default_factory=list)
+    icon: Optional[str] = None
+    clob_token_ids: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_api(cls, data: dict) -> "Market":
+        """Create Market from Gamma API response."""
+        # Parse outcome prices from JSON string
+        outcome_prices_str = data.get("outcomePrices", "[]")
+        try:
+            import json
+            if isinstance(outcome_prices_str, str):
+                outcome_prices = [float(p) for p in json.loads(outcome_prices_str)]
+            else:
+                outcome_prices = [float(p) for p in outcome_prices_str] if outcome_prices_str else []
+        except (json.JSONDecodeError, TypeError):
+            outcome_prices = []
+
+        # Parse clob token IDs
+        clob_ids_str = data.get("clobTokenIds", "[]")
+        try:
+            if isinstance(clob_ids_str, str):
+                clob_token_ids = json.loads(clob_ids_str)
+            else:
+                clob_token_ids = clob_ids_str if clob_ids_str else []
+        except (json.JSONDecodeError, TypeError):
+            clob_token_ids = []
+
+        # Extract tags
+        tags_data = data.get("tags", [])
+        tags = [t.get("slug", "") for t in tags_data] if isinstance(tags_data, list) else []
+
+        return cls(
+            condition_id=data.get("conditionId", data.get("condition_id", "")),
+            question=data.get("question", ""),
+            description=data.get("description", ""),
+            slug=data.get("slug", ""),
+            liquidity=float(data.get("liquidity", 0)),
+            volume=float(data.get("volume", 0)),
+            volume_24h=float(data.get("volume24hr", data.get("volume_24h", 0))),
+            open_interest=float(data.get("openInterest", data.get("open_interest", 0))),
+            outcome_prices=outcome_prices,
+            outcomes=data.get("outcomes", ["Yes", "No"]),
+            end_date=data.get("endDate", data.get("end_date")),
+            active=data.get("active", True),
+            closed=data.get("closed", False),
+            tags=tags,
+            icon=data.get("icon"),
+            clob_token_ids=clob_token_ids,
+        )
+
+    @property
+    def yes_price(self) -> float:
+        """Get YES outcome price."""
+        return self.outcome_prices[0] if self.outcome_prices else 0.5
+
+    @property
+    def no_price(self) -> float:
+        """Get NO outcome price."""
+        return self.outcome_prices[1] if len(self.outcome_prices) > 1 else 1 - self.yes_price
+
+    @property
+    def url(self) -> str:
+        """Get Polymarket URL for this market."""
+        return f"https://polymarket.com/event/{self.slug}"
+
+    def format_liquidity(self) -> str:
+        """Format liquidity for display."""
+        if self.liquidity >= 1_000_000:
+            return f"${self.liquidity / 1_000_000:.2f}M"
+        elif self.liquidity >= 1_000:
+            return f"${self.liquidity / 1_000:.1f}K"
+        return f"${self.liquidity:.0f}"
+
+
+@dataclass
+class MarketHolder:
+    """A holder of positions in a market."""
+    address: str
+    outcome: str
+    size: float
+    value: float
+    name: Optional[str] = None
+    pseudonym: Optional[str] = None
+
+    @classmethod
+    def from_api(cls, data: dict) -> "MarketHolder":
+        """Create MarketHolder from API response."""
+        return cls(
+            address=data.get("proxyWallet", data.get("address", "")),
+            outcome=data.get("outcome", ""),
+            size=float(data.get("size", 0)),
+            value=float(data.get("currentValue", data.get("value", 0))),
+            name=data.get("name"),
+            pseudonym=data.get("pseudonym"),
+        )
