@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 import aiohttp
 
-from .models import Position, Trade, Activity, PortfolioValue
+from .models import Position, Trade, Activity, PortfolioValue, Market, Tag, MarketHolder
 
 logger = logging.getLogger(__name__)
 
@@ -356,6 +356,207 @@ class PolymarketClient:
         }
 
         url = f"{self.BASE_URL}/holders"
+        data = await self._request("GET", url, params)
+
+        if not isinstance(data, list):
+            return []
+
+        return data
+
+    # ==================== Gamma API Methods ====================
+
+    async def get_markets(
+        self,
+        active: bool = True,
+        closed: bool = False,
+        order_by: str = "liquidity",
+        limit: int = 20,
+        offset: int = 0,
+        tag_slug: Optional[str] = None,
+    ) -> list[Market]:
+        """Get markets from Gamma API sorted by liquidity/volume.
+
+        Args:
+            active: Filter for active markets
+            closed: Filter for closed markets
+            order_by: Sort field (liquidity, volume, volume24hr)
+            limit: Results per page
+            offset: Pagination offset
+            tag_slug: Filter by tag/category
+
+        Returns:
+            List of Market objects
+        """
+        params = {
+            "limit": min(limit, 100),
+            "offset": offset,
+            "active": str(active).lower(),
+            "closed": str(closed).lower(),
+            "order": order_by,
+        }
+
+        if tag_slug:
+            params["tag_slug"] = tag_slug
+
+        url = f"{self.GAMMA_URL}/markets"
+        data = await self._request("GET", url, params)
+
+        if not isinstance(data, list):
+            return []
+
+        return [Market.from_api(item) for item in data]
+
+    async def search_markets(
+        self,
+        query: str,
+        limit: int = 20,
+    ) -> list[Market]:
+        """Search markets by name/description.
+
+        Args:
+            query: Search query
+            limit: Max results
+
+        Returns:
+            List of matching Market objects
+        """
+        params = {
+            "query": query,
+            "limit": min(limit, 100),
+        }
+
+        url = f"{self.GAMMA_URL}/search"
+        data = await self._request("GET", url, params)
+
+        # Search returns events, extract markets
+        if not data:
+            return []
+
+        # If search returns markets directly
+        if isinstance(data, list):
+            markets = []
+            for item in data:
+                # Handle both market and event responses
+                if "question" in item:
+                    markets.append(Market.from_api(item))
+                elif "markets" in item:
+                    for m in item.get("markets", []):
+                        markets.append(Market.from_api(m))
+            return markets[:limit]
+
+        return []
+
+    async def get_market_by_slug(
+        self,
+        slug: str,
+    ) -> Optional[Market]:
+        """Get single market by slug.
+
+        Args:
+            slug: Market slug
+
+        Returns:
+            Market object or None
+        """
+        url = f"{self.GAMMA_URL}/markets/{slug}"
+        data = await self._request("GET", url)
+
+        if not data or isinstance(data, list):
+            return None
+
+        return Market.from_api(data)
+
+    async def get_market_by_condition_id(
+        self,
+        condition_id: str,
+    ) -> Optional[Market]:
+        """Get single market by condition ID.
+
+        Args:
+            condition_id: Market condition ID
+
+        Returns:
+            Market object or None
+        """
+        params = {"condition_id": condition_id}
+        url = f"{self.GAMMA_URL}/markets"
+        data = await self._request("GET", url, params)
+
+        if not data or not isinstance(data, list) or len(data) == 0:
+            return None
+
+        return Market.from_api(data[0])
+
+    async def get_market_positions(
+        self,
+        condition_id: str,
+        limit: int = 50,
+    ) -> list[MarketHolder]:
+        """Get top holders/positions for a market.
+
+        Args:
+            condition_id: Market condition ID
+            limit: Max holders per outcome
+
+        Returns:
+            List of MarketHolder objects
+        """
+        holders_data = await self.get_market_holders(condition_id, limit)
+
+        holders = []
+        for item in holders_data:
+            holders.append(MarketHolder.from_api(item))
+
+        return holders
+
+    async def get_tags(self) -> list[Tag]:
+        """Get available categories/tags.
+
+        Returns:
+            List of Tag objects
+        """
+        url = f"{self.GAMMA_URL}/tags"
+        data = await self._request("GET", url)
+
+        if not isinstance(data, list):
+            return []
+
+        return [Tag.from_api(item) for item in data]
+
+    async def get_events(
+        self,
+        active: bool = True,
+        closed: bool = False,
+        order_by: str = "liquidity",
+        limit: int = 20,
+        offset: int = 0,
+        tag_slug: Optional[str] = None,
+    ) -> list[dict]:
+        """Get events from Gamma API.
+
+        Args:
+            active: Filter for active events
+            closed: Filter for closed events
+            order_by: Sort field
+            limit: Results per page
+            offset: Pagination offset
+            tag_slug: Filter by tag
+
+        Returns:
+            List of event dicts
+        """
+        params = {
+            "limit": min(limit, 100),
+            "offset": offset,
+            "active": str(active).lower(),
+            "closed": str(closed).lower(),
+            "order": order_by,
+        }
+
+        if tag_slug:
+            params["tag_slug"] = tag_slug
+
+        url = f"{self.GAMMA_URL}/events"
         data = await self._request("GET", url, params)
 
         if not isinstance(data, list):
