@@ -33,13 +33,17 @@ def build_trader_actions_keyboard(
     address: str,
     exchange: str = "hyperliquid",
     is_tracked: bool = False,
+    is_copy_enabled: bool = False,
+    is_watchlisted: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Build inline keyboard for trader analytics actions.
+    """Build inline keyboard for trader analytics actions (SuperX style).
 
     Args:
         address: Wallet address
         exchange: Exchange name
         is_tracked: Whether wallet is already tracked
+        is_copy_enabled: Whether copy trading is enabled
+        is_watchlisted: Whether wallet is in watchlist
 
     Returns:
         InlineKeyboardMarkup
@@ -49,30 +53,46 @@ def build_trader_actions_keyboard(
     # Shorten address for callback data (64 char limit)
     addr_short = address[:20]
 
-    # Row 1: Track/Untrack and Copy
+    # Row 1: Copy Trade | Track Wallet
+    copy_prefix = "🟢 " if is_copy_enabled else ""
+    builder.button(
+        text=f"{copy_prefix}Copy Trade",
+        callback_data=CopyTradingAction(
+            action="enable", address=addr_short, mode="signals"
+        ).pack(),
+    )
+
+    track_prefix = "👀 " if is_tracked else ""
     if is_tracked:
         builder.button(
-            text="🔕 Untrack",
+            text=f"{track_prefix}Untrack",
             callback_data=TraderAction(
                 action="untrack", address=addr_short, exchange=exchange
             ).pack(),
         )
     else:
         builder.button(
-            text="🔔 Track Wallet",
+            text="Track Wallet",
             callback_data=TraderAction(
                 action="track", address=addr_short, exchange=exchange
             ).pack(),
         )
 
+    # Row 2: Add To Watchlist | More Info (URL)
+    watchlist_prefix = "⭐ " if is_watchlisted else ""
     builder.button(
-        text="📋 Copy Signals",
-        callback_data=CopyTradingAction(
-            action="enable", address=addr_short, mode="signals"
-        ).pack(),
+        text=f"{watchlist_prefix}Add To Watchlist",
+        callback_data=WatchlistAction(action="add", address=addr_short).pack(),
     )
 
-    # Row 2: Positions and PnL
+    # URL button to Hyperliquid explorer
+    explorer_url = f"https://app.hyperliquid.xyz/explorer/address/{address}"
+    builder.button(
+        text="More Info",
+        url=explorer_url,
+    )
+
+    # Row 3: Positions | PnL | Refresh
     builder.button(
         text="📊 Positions",
         callback_data=TraderAction(
@@ -80,26 +100,20 @@ def build_trader_actions_keyboard(
         ).pack(),
     )
     builder.button(
-        text="💰 PnL History",
+        text="💰 PnL",
         callback_data=TraderAction(
             action="pnl", address=addr_short, exchange=exchange
         ).pack(),
     )
-
-    # Row 3: Add to Watchlist and Refresh
     builder.button(
-        text="⭐ Add to Watchlist",
-        callback_data=WatchlistAction(action="add", address=addr_short).pack(),
-    )
-    builder.button(
-        text="🔄 Refresh",
+        text="🔄",
         callback_data=TraderAction(
             action="refresh", address=addr_short, exchange=exchange
         ).pack(),
     )
 
-    # Arrange: 2-2-2
-    builder.adjust(2, 2, 2)
+    # Arrange: 2-2-3
+    builder.adjust(2, 2, 3)
     return builder.as_markup()
 
 

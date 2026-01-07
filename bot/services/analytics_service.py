@@ -471,8 +471,108 @@ class AnalyticsService:
         return round((period_pnl / account_value) * 100, 2)
 
 
-def format_trader_analytics(analytics: TraderAnalytics) -> str:
-    """Format analytics for Telegram message.
+def format_relative_time(timestamp: float) -> str:
+    """Format timestamp as relative time (e.g., '5m ago', '2h ago', '3d ago')."""
+    if timestamp <= 0:
+        return "Never"
+
+    now = time.time()
+    diff = now - timestamp
+
+    if diff < 60:
+        return f"{int(diff)}s ago"
+    elif diff < 3600:
+        return f"{int(diff / 60)}m ago"
+    elif diff < 86400:
+        return f"{int(diff / 3600)}h ago"
+    else:
+        return f"{int(diff / 86400)}d ago"
+
+
+def format_age(days: int) -> str:
+    """Format account age in human-readable format."""
+    if days < 7:
+        return f"{days} days"
+    elif days < 30:
+        weeks = days // 7
+        return f"{weeks} week{'s' if weeks > 1 else ''}"
+    elif days < 365:
+        months = days // 30
+        return f"{months} month{'s' if months > 1 else ''}"
+    else:
+        years = days // 365
+        return f"{years} year{'s' if years > 1 else ''}"
+
+
+def format_roe_indicator(roe: float) -> str:
+    """Format ROE with colored indicator."""
+    indicator = "🟩" if roe >= 0 else "🟥"
+    return f"{roe:.2f}% {indicator}"
+
+
+def format_drawdown_indicator(drawdown: float) -> str:
+    """Format max drawdown with colored indicator."""
+    # Lower is better for drawdown
+    if drawdown <= 10:
+        indicator = "🟩"
+    elif drawdown <= 25:
+        indicator = "🟨"
+    else:
+        indicator = "🟥"
+    return f"{drawdown:.2f}% {indicator}"
+
+
+def format_trader_analytics(analytics: TraderAnalytics, bot_username: str = "printdao_bot") -> str:
+    """Format analytics for Telegram message in SuperX style.
+
+    Args:
+        analytics: TraderAnalytics object
+        bot_username: Bot username for deep links
+
+    Returns:
+        Formatted HTML string
+    """
+    address = analytics.address
+    addr_short = f"{address[:6]}...{address[-3:]}"
+
+    # Direction bias as percentage (long %)
+    long_pct = int((analytics.direction_bias + 1) / 2 * 100)
+    bias_text = f"{long_pct}% Long"
+
+    # Last trade relative time
+    last_trade = format_relative_time(analytics.last_trade_timestamp)
+
+    # Account age
+    age_text = format_age(analytics.account_age_days)
+
+    # Profit factor - handle infinity
+    if analytics.profit_factor == float('inf'):
+        pf_text = "∞"
+    else:
+        pf_text = f"{analytics.profit_factor:.2f}"
+
+    lines = [
+        f"<a href='https://app.hyperliquid.xyz/explorer/address/{address}'>{addr_short}</a>",
+        f"<b>Trader Type:</b> Wallet",
+        f"<b>Trader Age:</b> {age_text}",
+        f"<b>Profit Factor:</b> {pf_text}",
+        f"<b>All Time PNL:</b> ${analytics.all_time_pnl:,.2f}",
+        f"<b>7 day ROE:</b> {format_roe_indicator(analytics.roe_7d)}",
+        f"<b>30 day ROE:</b> {format_roe_indicator(analytics.roe_30d)}",
+        f"<b>90 day ROE:</b> {format_roe_indicator(analytics.roe_90d)}",
+        f"<b>All Time ROE:</b> {format_roe_indicator(analytics.roe_all_time)}",
+        f"<b>Max Drawdown:</b> {format_drawdown_indicator(analytics.max_drawdown)}",
+        f"<b>Trades per day:</b> {analytics.trades_per_day:.2f}",
+        f"<b>Direction Bias:</b> {bias_text}",
+        f"<b>Last trade:</b> {last_trade}",
+        f"<b>Win Rate:</b> {analytics.win_rate:.2f}%",
+    ]
+
+    return "\n".join(lines)
+
+
+def format_trader_analytics_detailed(analytics: TraderAnalytics) -> str:
+    """Format detailed analytics with all stats.
 
     Args:
         analytics: TraderAnalytics object

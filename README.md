@@ -180,13 +180,14 @@ btc >500k       Combined filters
 /hl_positions <address>        - Show positions
 /hl_pnl <address>              - Show PnL
 /hl_trades <coin> [filter]     - Recent trades with optional filter
+/hl_last_trades <coin> [count] - Last N trades (10/20/50)
 /hl_whales [filter]            - Whale trades with optional filter
 /hl_indexed [filter]           - Indexed trades from Redis
 /hl_sentiment <coin>           - Market sentiment
 /hl_market <coin>              - Market info
 /hl_coins                      - List available coins
 /hl_fills <address>            - Recent fills for address
-/hl_analytics <address>        - Trader analytics (TrySuper.co style)
+/hl_analytics <address>        - Trader analytics (SuperX style)
 ```
 
 **Settings & Configuration**
@@ -207,6 +208,7 @@ btc >500k       Combined filters
 /pm_indexed 10k-100k           - PM trades between $10k-$100k
 /hl_whales btc                 - HL whales for BTC
 /hl_trades ETH >100k           - ETH trades above $100k
+/hl_last_trades BTC 50         - Last 50 BTC trades
 /hl_indexed sol                - Indexed SOL trades
 ```
 

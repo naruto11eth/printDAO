@@ -129,13 +129,13 @@ async def cmd_hl_trades(
         for trade in trades[:15]:
             dir_emoji = "🟢" if trade.direction == Direction.LONG else "🔴"
             dir_text = "LONG" if trade.direction == Direction.LONG else "SHORT"
-            time_str = trade.datetime.strftime("%H:%M:%S")
             notional = format_usd_short(trade.notional_usd)
+            address = trade.users[0]
 
             lines.append(
                 f"{dir_emoji} <b>{dir_text}</b> {notional}\n"
                 f"   {float(trade.size):,.4f} @ ${float(trade.price):,.2f}\n"
-                f"   {time_str} | <code>{shorten_address(trade.users[0])}</code>"
+                f"   <code>{address}</code>"
             )
 
         if len(trades) > 15:
@@ -145,6 +145,75 @@ async def cmd_hl_trades(
 
     except Exception as e:
         logger.error(f"Error getting trades for {coin}: {e}")
+        await message.reply(f"Error fetching trades: {str(e)}")
+
+
+@router.message(Command("hl_last_trades"))
+async def cmd_hl_last_trades(
+    message: Message,
+    command: CommandObject,
+    hyperliquid_client: Optional[HyperliquidClient] = None,
+) -> None:
+    """Show last N trades for a coin.
+
+    Usage: /hl_last_trades <coin> [count]
+    Count options: 10, 20, 50 (default: 10)
+    """
+    if not command.args:
+        await message.reply(
+            "<b>Usage:</b> /hl_last_trades &lt;coin&gt; [count]\n\n"
+            "<b>Examples:</b>\n"
+            "<code>/hl_last_trades BTC</code> - last 10 BTC trades\n"
+            "<code>/hl_last_trades ETH 20</code> - last 20 ETH trades\n"
+            "<code>/hl_last_trades SOL 50</code> - last 50 SOL trades",
+            parse_mode="HTML",
+        )
+        return
+
+    if not hyperliquid_client:
+        await message.reply("Hyperliquid client is not available.")
+        return
+
+    parts = command.args.strip().split()
+    coin = parts[0].upper()
+
+    # Parse count (default 10, max 50)
+    count = 10
+    if len(parts) > 1:
+        try:
+            count = min(int(parts[1]), 50)
+        except ValueError:
+            count = 10
+
+    await message.bot.send_chat_action(message.chat.id, "typing")
+
+    try:
+        trades = await hyperliquid_client.get_recent_trades(coin, count)
+
+        if not trades:
+            await message.reply(f"No trades found for {coin}", parse_mode="HTML")
+            return
+
+        lines = [
+            f"<b>Last {len(trades)} {coin} Trades</b>\n",
+        ]
+
+        for trade in trades:
+            dir_emoji = "🟢" if trade.direction == Direction.LONG else "🔴"
+            dir_text = "LONG" if trade.direction == Direction.LONG else "SHORT"
+            notional = format_usd_short(trade.notional_usd)
+            address = trade.users[0]
+
+            lines.append(
+                f"{dir_emoji} <b>{dir_text}</b> {notional}\n"
+                f"   {float(trade.size):,.4f} @ ${float(trade.price):,.2f}\n"
+                f"   <code>{address}</code>"
+            )
+
+        await message.reply("\n".join(lines), parse_mode="HTML")
+
+    except Exception as e:
+        logger.error(f"Error getting last trades for {coin}: {e}")
         await message.reply(f"Error fetching trades: {str(e)}")
 
 
@@ -523,13 +592,12 @@ async def cmd_hl_whales(
         for trade in trades[:15]:
             dir_emoji = "🟢" if trade.direction == Direction.LONG else "🔴"
             dir_text = "LONG" if trade.direction == Direction.LONG else "SHORT"
-            time_str = trade.datetime.strftime("%m/%d %H:%M")
-            trader = shorten_address(trade.users[0])
+            address = trade.users[0]
 
             lines.append(
                 f"{dir_emoji} <b>{format_usd_short(trade.notional_usd)}</b> {trade.coin} {dir_text}\n"
                 f"   {float(trade.size):,.4f} @ ${float(trade.price):,.2f}\n"
-                f"   {time_str} | <code>{trader}</code>"
+                f"   <code>{address}</code>"
             )
 
         if len(trades) > 15:
