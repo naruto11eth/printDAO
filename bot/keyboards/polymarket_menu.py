@@ -19,7 +19,7 @@ class PMMarketAction(CallbackData, prefix="pm_mkt"):
     """Market-specific actions."""
 
     action: str  # "view", "positions", "news", "back"
-    market_id: str  # condition_id (shortened to 20 chars)
+    market_id: str  # slug (truncated to 45 chars if needed)
     page: int = 0
 
 
@@ -89,12 +89,12 @@ def build_pm_top_markets(
 
     # Market buttons (numbered 1-10)
     for i, market in enumerate(markets, 1):
-        # Shorten market_id to fit callback limit
-        market_id_short = market.condition_id[:20] if market.condition_id else market.slug[:20]
+        # Use slug for lookup (truncate to 45 chars to fit callback limit)
+        market_slug = market.slug[:45] if market.slug else market.condition_id[:45]
         builder.button(
             text=f"{i}",
             callback_data=PMMarketAction(
-                action="view", market_id=market_id_short, page=page
+                action="view", market_id=market_slug, page=page
             ).pack(),
         )
 
@@ -148,16 +148,17 @@ def build_pm_market_detail(
         InlineKeyboardMarkup
     """
     builder = InlineKeyboardBuilder()
-    market_id_short = market.condition_id[:20] if market.condition_id else market.slug[:20]
+    # Use slug for lookup (truncate to 45 chars if needed)
+    market_slug = market.slug[:45] if market.slug else market.condition_id[:45]
 
     # Row 1: Positions | News
     builder.button(
         text="👥 Positions",
-        callback_data=PMMarketAction(action="positions", market_id=market_id_short).pack(),
+        callback_data=PMMarketAction(action="positions", market_id=market_slug).pack(),
     )
     builder.button(
         text="📰 News",
-        callback_data=PMMarketAction(action="news", market_id=market_id_short).pack(),
+        callback_data=PMMarketAction(action="news", market_id=market_slug).pack(),
     )
 
     # Row 2: Trade on Polymarket (URL)
@@ -262,11 +263,12 @@ def build_pm_category_markets(
 
     # Market buttons
     for i, market in enumerate(markets, 1):
-        market_id_short = market.condition_id[:20] if market.condition_id else market.slug[:20]
+        # Use slug for lookup (truncate to 45 chars if needed)
+        market_slug = market.slug[:45] if market.slug else market.condition_id[:45]
         builder.button(
             text=f"{i}",
             callback_data=PMMarketAction(
-                action="view", market_id=market_id_short, page=page
+                action="view", market_id=market_slug, page=page
             ).pack(),
         )
 
@@ -327,11 +329,12 @@ def build_pm_search_results(
 
     # Market buttons
     for i, market in enumerate(markets, 1):
-        market_id_short = market.condition_id[:20] if market.condition_id else market.slug[:20]
+        # Use slug for lookup (truncate to 45 chars if needed)
+        market_slug = market.slug[:45] if market.slug else market.condition_id[:45]
         builder.button(
             text=f"{i}",
             callback_data=PMMarketAction(
-                action="view", market_id=market_id_short, page=page
+                action="view", market_id=market_slug, page=page
             ).pack(),
         )
 

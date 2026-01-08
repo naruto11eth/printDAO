@@ -756,17 +756,34 @@ async def callback_pm_top_markets(
 
     page = callback_data.page
     per_page = 10
-    offset = page * per_page
 
     try:
         client = polymarket_indexer.client
-        markets = await client.get_markets(active=True, order_by="liquidity", limit=per_page, offset=offset)
+
+        # Fetch enough markets for pagination, sorted client-side
+        # API ordering is unreliable, so we fetch more and sort ourselves
+        total_needed = (page + 1) * per_page + per_page  # Current page + buffer
+        all_markets = await client.get_markets(
+            active=True,
+            order_by="liquidity",
+            limit=min(total_needed, 100),  # Cap at 100
+            offset=0,  # Always start from 0 for consistent sorting
+        )
+
+        if not all_markets:
+            await callback.answer("No markets available", show_alert=True)
+            return
+
+        # Slice for current page
+        start_idx = page * per_page
+        end_idx = start_idx + per_page
+        markets = all_markets[start_idx:end_idx]
 
         if not markets:
             await callback.answer("No more markets", show_alert=True)
             return
 
-        start_num = offset + 1
+        start_num = start_idx + 1
         text = f"🔥 <b>Top Markets by Liquidity</b> (Page {page + 1})\n\n" + format_market_list(markets, start_num)
         keyboard = build_pm_top_markets(markets, page=page)
 
@@ -911,24 +928,44 @@ async def callback_pm_category_select(
     tag_slug = callback_data.tag_slug
     page = callback_data.page
     per_page = 10
-    offset = page * per_page
 
     try:
         client = polymarket_indexer.client
-        markets = await client.get_markets(
+
+        # API tag filtering is unreliable, so we fetch all and filter client-side
+        # Search for markets that might match the category name
+        category_keywords = tag_slug.replace("-", " ").lower()
+
+        # Fetch markets and filter by searching question text
+        all_markets = await client.get_markets(
             active=True,
             order_by="liquidity",
-            limit=per_page,
-            offset=offset,
-            tag_slug=tag_slug,
+            limit=100,
+            offset=0,
         )
 
+        # Client-side filter: check if category keyword appears in question
+        filtered_markets = [
+            m for m in all_markets
+            if any(kw in m.question.lower() for kw in category_keywords.split())
+        ]
+
+        # If no matches, show top markets instead
+        if not filtered_markets:
+            filtered_markets = all_markets
+
+        # Paginate
+        start_idx = page * per_page
+        end_idx = start_idx + per_page
+        markets = filtered_markets[start_idx:end_idx]
+
         if not markets:
-            await callback.answer(f"No markets in {tag_slug}", show_alert=True)
+            await callback.answer("No more markets", show_alert=True)
             return
 
-        start_num = offset + 1
-        text = f"📁 <b>{tag_slug.title()} Markets</b> (Page {page + 1})\n\n" + format_market_list(markets, start_num)
+        start_num = start_idx + 1
+        category_title = tag_slug.replace("-", " ").title()
+        text = f"📁 <b>{category_title} Markets</b> (Page {page + 1})\n\n" + format_market_list(markets, start_num)
         keyboard = build_pm_category_markets(markets, tag_slug, page=page)
 
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
@@ -952,35 +989,18 @@ async def callback_pm_market_view(
         await callback.answer("Polymarket not available", show_alert=True)
         return
 
-    market_id = callback_data.market_id
+    market_slug = callback_data.market_id  # Now contains slug
     page = callback_data.page
 
     try:
         client = polymarket_indexer.client
 
-        # Look up full market ID from Redis if available
-        full_id = market_id
-        if redis_client:
-            cached_id = await redis_client.redis.get(f"pm:market_id:{market_id}")
-            if cached_id:
-                full_id = cached_id
-
-        # Try to get market by condition_id or slug
-        market = await client.get_market_by_condition_id(full_id)
-        if not market:
-            market = await client.get_market_by_slug(full_id)
+        # Lookup by slug directly (slugs are unique identifiers)
+        market = await client.get_market_by_slug(market_slug)
 
         if not market:
             await callback.answer("Market not found", show_alert=True)
             return
-
-        # Cache the mapping
-        if redis_client and market.condition_id:
-            await redis_client.redis.set(
-                f"pm:market_id:{market_id}",
-                market.condition_id,
-                ex=86400,
-            )
 
         text = format_market_detail(market)
         keyboard = build_pm_market_detail(market, page)
@@ -1006,21 +1026,20 @@ async def callback_pm_market_positions(
         await callback.answer("Polymarket not available", show_alert=True)
         return
 
-    market_id = callback_data.market_id
+    market_slug = callback_data.market_id  # Now contains slug
     page = callback_data.page
 
     try:
         client = polymarket_indexer.client
 
-        # Get full ID from cache
-        full_id = market_id
-        if redis_client:
-            cached_id = await redis_client.redis.get(f"pm:market_id:{market_id}")
-            if cached_id:
-                full_id = cached_id
+        # First get market by slug to get condition_id
+        market = await client.get_market_by_slug(market_slug)
+        if not market:
+            await callback.answer("Market not found", show_alert=True)
+            return
 
-        # Get positions
-        holders = await client.get_market_positions(full_id, limit=20)
+        # Get positions using condition_id
+        holders = await client.get_market_positions(market.condition_id, limit=20)
 
         if not holders:
             await callback.answer("No positions found", show_alert=True)
@@ -1045,7 +1064,7 @@ async def callback_pm_market_positions(
                 lines.append(f"{i}. {addr_short} - ${h.value:,.0f}")
 
         text = "\n".join(lines)
-        keyboard = build_pm_positions_keyboard(market_id, page)
+        keyboard = build_pm_positions_keyboard(market_slug, page)
 
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
 
@@ -1068,22 +1087,14 @@ async def callback_pm_market_news(
         await callback.answer("Polymarket not available", show_alert=True)
         return
 
-    market_id = callback_data.market_id
+    market_slug = callback_data.market_id  # Now contains slug
     page = callback_data.page
 
     try:
         client = polymarket_indexer.client
 
-        # Get market to extract topic
-        full_id = market_id
-        if redis_client:
-            cached_id = await redis_client.redis.get(f"pm:market_id:{market_id}")
-            if cached_id:
-                full_id = cached_id
-
-        market = await client.get_market_by_condition_id(full_id)
-        if not market:
-            market = await client.get_market_by_slug(full_id)
+        # Get market by slug to extract topic
+        market = await client.get_market_by_slug(market_slug)
 
         if not market:
             await callback.answer("Market not found", show_alert=True)
@@ -1108,7 +1119,7 @@ async def callback_pm_market_news(
         ]
 
         text = "\n".join(lines)
-        keyboard = build_pm_news_keyboard(market_id, page)
+        keyboard = build_pm_news_keyboard(market_slug, page)
 
         await callback.message.edit_text(
             text, parse_mode="HTML", reply_markup=keyboard, disable_web_page_preview=True
