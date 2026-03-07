@@ -9,7 +9,7 @@ from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from shared.utils import shorten_address, is_valid_ethereum_address
+from shared.utils import shorten_address, is_valid_ethereum_address, escape_html
 from indexers.polymarket import PolymarketIndexer, Position, Market, Tag, MarketHolder
 from indexers.polymarket.client import PolymarketClient
 from bot.utils.filters import parse_filter_args, format_filter_summary
@@ -677,10 +677,10 @@ async def cmd_pm_search(
         markets = await client.search_markets(query, limit=10)
 
         if not markets:
-            await message.reply(f"No markets found for: <b>{query}</b>", parse_mode="HTML")
+            await message.reply(f"No markets found for: <b>{escape_html(query)}</b>", parse_mode="HTML")
             return
 
-        text = f"🔍 <b>Search Results: {query}</b>\n\n" + format_market_list(markets)
+        text = f"🔍 <b>Search Results: {escape_html(query)}</b>\n\n" + format_market_list(markets)
         keyboard = build_pm_search_results(markets, query, page=0)
 
         await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
@@ -833,7 +833,7 @@ async def process_search_query(
         markets = await client.search_markets(query, limit=10)
 
         if not markets:
-            text = f"No markets found for: <b>{query}</b>\n\nTry a different search term."
+            text = f"No markets found for: <b>{escape_html(query)}</b>\n\nTry a different search term."
             keyboard = build_pm_main_menu()
             await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
             return
