@@ -1,20 +1,26 @@
 """Polymarket indexer - main service for tracking wallets and detecting whales."""
 
 import asyncio
+import json
 import logging
+import re
+import time
+from datetime import datetime, timezone
 from typing import Optional, Callable, Awaitable
-from datetime import datetime
 
 from bot.storage.redis_client import RedisClient
 from bot.storage.models import WhaleAlert, TrackedWallet
 from bot.services.notification_service import NotificationService
 from shared.constants import REDIS_KEYS
+from shared.utils import escape_html, shorten_address
 
 from .client import PolymarketClient
 from .tracker import PolymarketTracker, WhaleDetector
 from .models import Trade, Activity, Position
 
 logger = logging.getLogger(__name__)
+
+_USER_WALLETS_KEY_PATTERN = re.compile(r"user:(\d+):wallets")
 
 
 class PolymarketIndexer:
@@ -83,27 +89,35 @@ class PolymarketIndexer:
         """Poll tracked wallets for new activity."""
         while self._running:
             try:
-                # Get all tracked wallets for Polymarket
                 pattern = REDIS_KEYS["user_wallets"].format(user_id="*")
-                keys = await self.redis.redis.keys(pattern)
+                cursor = b"0"
+                while True:
+                    cursor, keys = await self.redis.redis.scan(
+                        cursor=cursor, match=pattern, count=100
+                    )
+                    for key in keys:
+                        key_str = key if isinstance(key, str) else key.decode()
+                        match = _USER_WALLETS_KEY_PATTERN.search(key_str)
+                        if not match:
+                            continue
+                        user_id = int(match.group(1))
 
-                for key in keys:
-                    # Get wallet data
-                    wallets_data = await self.redis.redis.hgetall(key)
+                        wallets_data = await self.redis.hgetall(key_str)
+                        for wallet_key, wallet_data in wallets_data.items():
+                            try:
+                                if isinstance(wallet_data, str):
+                                    wallet_data = json.loads(wallet_data)
+                                wallet = TrackedWallet.from_dict(wallet_data)
 
-                    for wallet_key, wallet_json in wallets_data.items():
-                        try:
-                            wallet = TrackedWallet.from_json(wallet_json)
+                                if wallet.exchange not in ("polymarket", "all"):
+                                    continue
 
-                            # Only process Polymarket or "all" exchange wallets
-                            if wallet.exchange not in ("polymarket", "all"):
-                                continue
+                                await self._check_wallet_activity(wallet, user_id)
+                            except Exception as e:
+                                logger.error(f"Error processing wallet {wallet_key}: {e}")
 
-                            # Check for new trades
-                            await self._check_wallet_activity(wallet)
-
-                        except Exception as e:
-                            logger.error(f"Error processing wallet {wallet_key}: {e}")
+                    if cursor == 0 or cursor == b"0":
+                        break
 
                 await asyncio.sleep(self.poll_interval)
 
@@ -111,74 +125,68 @@ class PolymarketIndexer:
                 logger.error(f"Error in wallet polling loop: {e}")
                 await asyncio.sleep(self.poll_interval)
 
-    async def _check_wallet_activity(self, wallet: TrackedWallet) -> None:
+    async def _check_wallet_activity(self, wallet: TrackedWallet, user_id: int) -> None:
         """Check a wallet for new trading activity.
 
         Args:
             wallet: Tracked wallet to check
+            user_id: Telegram user ID who is tracking this wallet
         """
-        # Get last check timestamp from Redis
         last_check_key = f"pm:last_check:{wallet.address}"
-        last_check = await self.redis.redis.get(last_check_key)
+        last_check = await self.redis.get(last_check_key)
         last_timestamp = int(last_check) if last_check else None
 
-        # Get recent trades
         trades = await self.tracker.detect_whale_trades(
             address=wallet.address,
             since_timestamp=last_timestamp,
         )
 
-        # Send alerts for whale trades
         for trade in trades:
-            await self._send_trade_alert(wallet, trade)
+            await self._send_trade_alert(wallet, trade, user_id)
 
-        # Update last check timestamp
-        await self.redis.redis.set(last_check_key, str(int(datetime.now().timestamp())))
+        now_ts = str(int(datetime.now(tz=timezone.utc).timestamp()))
+        await self.redis.set(last_check_key, now_ts)
 
-    async def _send_trade_alert(self, wallet: TrackedWallet, trade: Activity) -> None:
+    async def _send_trade_alert(
+        self, wallet: TrackedWallet, trade: Activity, user_id: int
+    ) -> None:
         """Send alert for a tracked wallet trade.
 
         Args:
             wallet: The tracked wallet
             trade: The trade activity
+            user_id: Telegram user ID to send to
         """
-        # Create whale alert
-        alert = WhaleAlert(
-            exchange="polymarket",
-            address=wallet.address,
-            trade_type=trade.side.value if trade.side else "TRADE",
-            size=trade.usdc_size,
-            market=trade.title,
-            price=trade.price,
-            timestamp=datetime.fromtimestamp(trade.timestamp),
-        )
-
-        # Format message
-        side_emoji = "🟢" if trade.side and trade.side.value == "BUY" else "🔴"
-        label_str = f" ({wallet.label})" if wallet.label else ""
+        side_str = trade.side.value if trade.side else "TRADE"
+        side_emoji = "🟢" if side_str == "BUY" else "🔴"
+        label_str = f" ({escape_html(wallet.label)})" if wallet.label else ""
+        market_title = escape_html(trade.title or "Unknown Market")
 
         message = (
             f"{side_emoji} <b>Tracked Wallet Trade</b>\n\n"
-            f"<b>Wallet:</b> <code>{wallet.address[:10]}...{wallet.address[-6:]}</code>{label_str}\n"
-            f"<b>Market:</b> {trade.title}\n"
-            f"<b>Position:</b> {trade.outcome}\n"
-            f"<b>Side:</b> {trade.side.value if trade.side else 'TRADE'}\n"
+            f"<b>Wallet:</b> <code>{shorten_address(wallet.address)}</code>{label_str}\n"
+            f"<b>Market:</b> {market_title}\n"
+            f"<b>Position:</b> {escape_html(trade.outcome or '')}\n"
+            f"<b>Side:</b> {side_str}\n"
             f"<b>Size:</b> ${trade.usdc_size:,.2f}\n"
         )
 
         if trade.price:
-            message += f"<b>Price:</b> {trade.price*100:.1f}%\n"
+            message += f"<b>Price:</b> {trade.price * 100:.1f}%\n"
 
-        message += (
-            f"\n<a href=\"https://polymarket.com/event/{trade.event_slug}\">View Market</a> | "
-            f"<a href=\"https://polygonscan.com/tx/{trade.transaction_hash}\">View Tx</a>"
-        )
+        if trade.event_slug:
+            message += (
+                f"\n<a href=\"https://polymarket.com/event/{trade.event_slug}\">View Market</a>"
+            )
+        if trade.transaction_hash:
+            message += (
+                f" | <a href=\"https://polygonscan.com/tx/{trade.transaction_hash}\">View Tx</a>"
+            )
 
-        # Send to user who's tracking this wallet
-        await self.notifications.send_whale_alert(
-            chat_id=wallet.user_id,
-            alert=alert,
-            custom_message=message,
+        await self.notifications.send_message(
+            chat_id=user_id,
+            text=message,
+            topic_name="polymarket",
         )
 
     async def _scan_whale_activity(self) -> None:
@@ -191,11 +199,10 @@ class PolymarketIndexer:
                 for trade in trades:
                     # Check if we've already processed this trade
                     processed_key = f"pm:processed:{trade.transaction_hash}"
-                    if await self.redis.redis.exists(processed_key):
+                    if await self.redis.exists(processed_key):
                         continue
 
-                    # Mark as processed (expire after 24 hours)
-                    await self.redis.redis.setex(processed_key, 86400, "1")
+                    await self.redis.set(processed_key, "1", ex=86400)
 
                     # Broadcast whale alert to all subscribers
                     await self._broadcast_whale_alert(trade)
@@ -212,45 +219,28 @@ class PolymarketIndexer:
         Args:
             trade: The whale trade
         """
-        # Get all chats subscribed to whale alerts
         subscribers_key = "pm:whale_subscribers"
         subscribers = await self.redis.redis.smembers(subscribers_key)
 
         if not subscribers:
             return
 
-        # Create alert
         alert = WhaleAlert(
             exchange="polymarket",
-            address=trade.proxy_wallet,
-            trade_type=trade.side.value,
-            size=trade.usdc_size,
-            market=trade.title,
+            wallet=trade.proxy_wallet,
+            alert_type="whale_trade",
+            trade_value=trade.usdc_size,
+            side=trade.side.value if trade.side else None,
+            market_title=trade.title,
             price=trade.price,
-            timestamp=datetime.fromtimestamp(trade.timestamp),
+            timestamp=trade.timestamp if isinstance(trade.timestamp, (int, float)) else time.time(),
         )
 
-        # Format message
-        side_emoji = "🟢" if trade.side.value == "BUY" else "🔴"
-        trader_name = trade.pseudonym or trade.name or f"{trade.proxy_wallet[:10]}..."
-
-        message = (
-            f"🐋 <b>Polymarket Whale Alert</b>\n\n"
-            f"{side_emoji} <b>{trader_name}</b>\n"
-            f"<b>Market:</b> {trade.title}\n"
-            f"<b>Position:</b> {trade.outcome}\n"
-            f"<b>Size:</b> <b>${trade.usdc_size:,.0f}</b>\n"
-            f"<b>Price:</b> {trade.price*100:.1f}%\n\n"
-            f"<a href=\"https://polymarket.com/event/{trade.event_slug}\">View Market</a>"
-        )
-
-        # Send to all subscribers
         for chat_id in subscribers:
             try:
                 await self.notifications.send_whale_alert(
                     chat_id=int(chat_id),
                     alert=alert,
-                    custom_message=message,
                 )
             except Exception as e:
                 logger.error(f"Error sending whale alert to {chat_id}: {e}")
@@ -265,7 +255,7 @@ class PolymarketIndexer:
             True if newly subscribed, False if already subscribed
         """
         key = "pm:whale_subscribers"
-        result = await self.redis.redis.sadd(key, str(chat_id))
+        result = await self.redis.sadd(key, str(chat_id))
         return result > 0
 
     async def unsubscribe_from_whales(self, chat_id: int) -> bool:
@@ -278,7 +268,7 @@ class PolymarketIndexer:
             True if unsubscribed, False if wasn't subscribed
         """
         key = "pm:whale_subscribers"
-        result = await self.redis.redis.srem(key, str(chat_id))
+        result = await self.redis.srem(key, str(chat_id))
         return result > 0
 
     # --- Query methods for bot commands ---
