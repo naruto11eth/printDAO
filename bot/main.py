@@ -9,6 +9,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from bot.config import BotConfig, setup_logging
+from bot.utils.auth import configure_admin_ids
 from bot.storage.redis_client import RedisClient
 from bot.services.wallet_service import WalletService
 from bot.services.notification_service import NotificationService
@@ -39,6 +40,8 @@ async def main() -> None:
         sys.exit(1)
 
     logger.info("Starting PrintDAO bot...")
+
+    configure_admin_ids(config.admin_user_ids)
 
     # Initialize Redis
     redis_client = RedisClient(config.redis_url)
@@ -160,14 +163,11 @@ async def main() -> None:
         logger.info("Shutdown complete.")
 
     # Start polling
-    try:
-        logger.info("Starting bot polling...")
-        await dp.start_polling(
-            bot,
-            allowed_updates=dp.resolve_used_update_types(),
-        )
-    finally:
-        await redis_client.disconnect()
+    logger.info("Starting bot polling...")
+    await dp.start_polling(
+        bot,
+        allowed_updates=dp.resolve_used_update_types(),
+    )
 
 
 def run() -> None:
