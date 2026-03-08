@@ -118,8 +118,8 @@ class RateLimiter:
         window_start = now - window_seconds
 
         # Remove old entries and count current
-        await self.redis.redis.zremrangebyscore(key, 0, window_start)
-        count = await self.redis.redis.zcard(key)
+        await self.redis.zremrangebyscore(key, 0, window_start)
+        count = await self.redis.zcard(key)
 
         return count
 
@@ -135,10 +135,10 @@ class RateLimiter:
             key = f"rate:{user_id}:{limit_type}:{window_name}"
 
             # Add current request
-            await self.redis.redis.zadd(key, {str(now): now})
+            await self.redis.zadd(key, {str(now): now})
 
             # Set expiry slightly longer than window
-            await self.redis.redis.expire(key, window_seconds + 10)
+            await self.redis.expire(key, window_seconds + 10)
 
     async def get_usage(
         self,

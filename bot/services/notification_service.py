@@ -8,7 +8,8 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot.storage.models import WhaleAlert, CopyTradeSignal, NotificationPreference
-from shared.utils import shorten_address, format_usd, format_percentage
+from shared.utils import shorten_address
+from shared.formatting import format_usd, format_percent
 
 logger = logging.getLogger(__name__)
 
