@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional
 import time
 import uuid
 
+from shared.models import safe_from_dict
+
 
 class NotificationPreference(str, Enum):
     """User notification preferences."""
@@ -31,8 +33,8 @@ class TrackedWallet:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "TrackedWallet":
-        """Create from dictionary."""
-        return cls(**data)
+        """Create from dictionary, filtering unknown fields."""
+        return safe_from_dict(cls, data)
 
 
 @dataclass
@@ -78,8 +80,8 @@ class WhaleInfo:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "WhaleInfo":
-        """Create from dictionary."""
-        return cls(**data)
+        """Create from dictionary, filtering unknown fields."""
+        return safe_from_dict(cls, data)
 
 
 @dataclass
@@ -143,8 +145,8 @@ class PnLResult:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PnLResult":
-        """Create from dictionary."""
-        return cls(**data)
+        """Create from dictionary, filtering unknown fields."""
+        return safe_from_dict(cls, data)
 
 
 @dataclass
@@ -189,8 +191,8 @@ class WhaleDetectionConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "WhaleDetectionConfig":
-        """Create from dictionary."""
-        return cls(**data)
+        """Create from dictionary, filtering unknown fields."""
+        return safe_from_dict(cls, data)
 
 
 @dataclass
