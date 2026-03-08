@@ -10,6 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 from shared.utils import shorten_address, is_valid_ethereum_address, escape_html
+from shared.formatting import format_usd, format_percent, format_pnl
 from indexers.polymarket import PolymarketIndexer, Position, Market, Tag, MarketHolder
 from indexers.polymarket.client import PolymarketClient
 from bot.utils.filters import parse_filter_args, format_filter_summary
@@ -33,26 +34,6 @@ logger = logging.getLogger(__name__)
 
 router = Router(name="polymarket")
 
-
-def format_usd(value: float) -> str:
-    """Format USD value with sign."""
-    if value >= 0:
-        return f"+${value:,.2f}"
-    return f"-${abs(value):,.2f}"
-
-
-def format_percent(value: float) -> str:
-    """Format percentage with sign."""
-    if value >= 0:
-        return f"+{value:.1f}%"
-    return f"{value:.1f}%"
-
-
-def format_pnl(usd_value: float, percent_value: float) -> str:
-    """Format PNL as USD with percentage in parentheses."""
-    usd_str = f"+${usd_value:,.2f}" if usd_value >= 0 else f"-${abs(usd_value):,.2f}"
-    pct_str = f"+{percent_value:.1f}%" if percent_value >= 0 else f"{percent_value:.1f}%"
-    return f"{usd_str} ({pct_str})"
 
 
 @router.message(Command("pm_positions"))
@@ -103,7 +84,7 @@ async def cmd_pm_positions(
             f"<b>Polymarket Positions</b>",
             f"<code>{shorten_address(address)}</code>\n",
             f"<b>Portfolio Value:</b> ${summary['total_value']:,.2f}",
-            f"<b>Total PnL:</b> {format_usd(summary['total_pnl'])}",
+            f"<b>Total PnL:</b> {format_usd(summary['total_pnl'], sign=True)}",
             f"<b>Positions:</b> {summary['position_count']} ({summary['winning_positions']}W / {summary['losing_positions']}L)\n",
             "<b>Top Positions:</b>",
         ]
@@ -183,9 +164,9 @@ async def cmd_pm_pnl(
         lines = [
             f"<b>Polymarket PnL - {period_labels[period]}</b>",
             f"<code>{shorten_address(address)}</code>\n",
-            f"{pnl_emoji} <b>Total PnL:</b> {format_usd(pnl.total_pnl)}",
-            f"<b>Realized:</b> {format_usd(pnl.realized_pnl)}",
-            f"<b>Unrealized:</b> {format_usd(pnl.unrealized_pnl)}\n",
+            f"{pnl_emoji} <b>Total PnL:</b> {format_usd(pnl.total_pnl, sign=True)}",
+            f"<b>Realized:</b> {format_usd(pnl.realized_pnl, sign=True)}",
+            f"<b>Unrealized:</b> {format_usd(pnl.unrealized_pnl, sign=True)}\n",
             f"<b>Win Rate:</b> {pnl.win_rate:.1f}%",
             f"<b>Trades:</b> {pnl.total_trades}",
             f"<b>W/L:</b> {pnl.winning_trades}W / {pnl.losing_trades}L",

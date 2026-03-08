@@ -10,7 +10,7 @@ from aiogram.filters import Command, CommandStart, CommandObject
 from bot.storage.redis_client import RedisClient
 from bot.services.whale_detector import ConfigurableWhaleDetector
 from bot.utils.auth import admin_required
-from shared.utils import format_usd
+from shared.formatting import format_usd
 
 logger = logging.getLogger(__name__)
 

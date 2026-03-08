@@ -10,14 +10,9 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from bot.storage.redis_client import RedisClient
 from bot.storage.models import UserPreferences
+from shared.constants import INTERVAL_LIMITS
 
 logger = logging.getLogger(__name__)
-
-# Default interval limits per exchange
-INTERVAL_LIMITS = {
-    "hyperliquid": {"min": 30, "max": 3600, "default": 60},
-    "polymarket": {"min": 60, "max": 3600, "default": 300},
-}
 
 
 class MarketMonitorScheduler:
@@ -261,7 +256,7 @@ class MarketMonitorScheduler:
     ) -> None:
         """Store user interval in Redis for persistence."""
         key = f"user:{user_id}:intervals"
-        await self.redis.redis.hset(key, exchange, str(interval_seconds))
+        await self.redis.hset(key, exchange, str(interval_seconds))
 
     async def _remove_user_interval(
         self,
@@ -270,7 +265,7 @@ class MarketMonitorScheduler:
     ) -> None:
         """Remove user interval from Redis."""
         key = f"user:{user_id}:intervals"
-        await self.redis.redis.hdel(key, exchange)
+        await self.redis.hdel(key, exchange)
 
     async def restore_user_jobs(self) -> int:
         """Restore all user jobs from Redis on startup.
@@ -285,7 +280,7 @@ class MarketMonitorScheduler:
         cursor = 0
 
         while True:
-            cursor, keys = await self.redis.redis.scan(cursor, match=pattern, count=100)
+            cursor, keys = await self.redis.scan(cursor, match=pattern, count=100)
 
             for key in keys:
                 key_str = key.decode() if isinstance(key, bytes) else key
@@ -294,7 +289,7 @@ class MarketMonitorScheduler:
                     continue
 
                 user_id = int(parts[1])
-                intervals = await self.redis.redis.hgetall(key_str)
+                intervals = await self.redis.hgetall(key_str)
 
                 for exchange, interval in intervals.items():
                     exchange_str = exchange.decode() if isinstance(exchange, bytes) else exchange
