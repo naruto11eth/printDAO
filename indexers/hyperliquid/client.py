@@ -4,16 +4,21 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from typing import Optional, Callable, List
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
+from shared.resilience import CircuitBreaker, CircuitOpenError
 from .models import Trade, Position, Fill, AssetContext, UserState, SentimentSummary, TradeSide, Direction
 
 logger = logging.getLogger(__name__)
+
+_hl_thread_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="hl-sdk")
+_hl_breaker = CircuitBreaker(name="hyperliquid", failure_threshold=5, recovery_timeout=60.0)
 
 
 class TradeCache:
@@ -95,23 +100,35 @@ class HyperliquidClient:
             self._info = Info(base_url=self.base_url, skip_ws=True)
         return self._info
 
-    def _retry_request(self, func: Callable, *args, **kwargs):
-        """Execute request with retry logic."""
+    def _sync_retry_request(self, func: Callable, *args, **kwargs):
+        """Execute synchronous SDK request with retry logic.
+
+        Runs inside the dedicated thread pool — time.sleep is acceptable here
+        because it only blocks the pool thread, not the event loop.
+        """
         delay = self.backoff_seconds
 
         for attempt in range(self.max_retries):
             try:
                 return func(*args, **kwargs)
             except Exception as e:
-                if "429" in str(e) and attempt < self.max_retries - 1:
-                    logger.warning(f"Rate limited, waiting {delay}s...")
-                    time.sleep(delay)
-                    delay = min(delay * 2, 10)
-                elif attempt < self.max_retries - 1:
-                    logger.warning(f"Request failed: {e}, retrying...")
-                    time.sleep(delay)
-                else:
+                if attempt >= self.max_retries - 1:
                     raise
+                if "429" in str(e):
+                    logger.warning(f"Rate limited (attempt {attempt + 1}), waiting {delay}s...")
+                else:
+                    logger.warning(f"Request failed (attempt {attempt + 1}): {e}")
+                time.sleep(delay)
+                delay = min(delay * 2, 10)
+
+    async def _run_in_pool(self, func: Callable, *args, **kwargs):
+        """Run a synchronous SDK call in the dedicated HL thread pool with circuit breaker."""
+        async def _execute():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                _hl_thread_pool, lambda: self._sync_retry_request(func, *args, **kwargs)
+            )
+        return await _hl_breaker.call(_execute)
 
     async def get_coins(self) -> List[str]:
         """Get list of available coins."""
@@ -123,7 +140,7 @@ class HyperliquidClient:
             meta = info.meta()
             return [asset["name"] for asset in meta.get("universe", [])]
 
-        self._coins = await asyncio.to_thread(self._retry_request, _fetch)
+        self._coins = await self._run_in_pool(_fetch)
         return self._coins
 
     async def get_recent_trades(self, coin: str, limit: int = 100) -> List[Trade]:
@@ -141,7 +158,7 @@ class HyperliquidClient:
             raw = info.post("/info", {"type": "recentTrades", "coin": coin})
             return [Trade.from_raw(coin, item) for item in raw[:limit]]
 
-        trades = await asyncio.to_thread(self._retry_request, _fetch)
+        trades = await self._run_in_pool(_fetch)
 
         # Add to cache
         for t in trades:
@@ -163,7 +180,7 @@ class HyperliquidClient:
             raw = info.user_state(address)
             return UserState.from_raw(address, raw)
 
-        return await asyncio.to_thread(self._retry_request, _fetch)
+        return await self._run_in_pool(_fetch)
 
     async def get_user_positions(self, address: str) -> List[Position]:
         """Get user's open positions.
@@ -194,7 +211,7 @@ class HyperliquidClient:
             fills.sort(key=lambda f: f.time_ms, reverse=True)
             return fills[:limit]
 
-        return await asyncio.to_thread(self._retry_request, _fetch)
+        return await self._run_in_pool(_fetch)
 
     async def get_asset_contexts(self) -> dict[str, AssetContext]:
         """Get market context for all assets.
@@ -216,7 +233,45 @@ class HyperliquidClient:
 
             return result
 
-        return await asyncio.to_thread(self._retry_request, _fetch)
+        return await self._run_in_pool(_fetch)
+
+    async def get_portfolio(self, address: str) -> dict:
+        """Get portfolio performance (ROE, PnL) directly from API.
+
+        Weight: 2 (very cheap). Returns day/week/month/allTime performance.
+        """
+        def _fetch():
+            info = self._get_info()
+            return info.post("/info", {"type": "portfolio", "user": address})
+
+        return await self._run_in_pool(_fetch)
+
+    async def get_user_fills_by_time(
+        self,
+        address: str,
+        start_time_ms: int,
+        end_time_ms: int | None = None,
+    ) -> list[Fill]:
+        """Get user fills within a time range.
+
+        More efficient than get_user_fills for time-windowed analytics.
+        Max 2000 per response, 10000 total per query.
+        """
+        def _fetch():
+            info = self._get_info()
+            params = {
+                "type": "userFillsByTime",
+                "user": address,
+                "startTime": start_time_ms,
+            }
+            if end_time_ms is not None:
+                params["endTime"] = end_time_ms
+            raw = info.post("/info", params)
+            fills = [Fill.from_raw(item) for item in raw]
+            fills.sort(key=lambda f: f.time_ms, reverse=True)
+            return fills
+
+        return await self._run_in_pool(_fetch)
 
     async def get_whale_trades(
         self,
@@ -295,7 +350,7 @@ class HyperliquidClient:
         trades = await self.get_recent_trades(coin, limit=500)
 
         # Filter by time
-        cutoff = datetime.now() - timedelta(hours=lookback_hours)
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=lookback_hours)
         recent_trades = [t for t in trades if t.datetime >= cutoff]
 
         longs = [t for t in recent_trades if t.direction == Direction.LONG]
