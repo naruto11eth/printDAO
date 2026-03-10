@@ -93,11 +93,13 @@ class PolymarketTradeIndexer(BaseTradeIndexer):
             "trader": trade.proxy_wallet or "",
             "event_title": trade.title or "",
         }
-        await r.hset(trade_key, mapping=trade_data)
-        await r.expire(trade_key, self.trades_ttl)
-        await r.zadd(self.trades_key, {trade.transaction_hash: trade.timestamp})
+        pipe = r.pipeline(transaction=True)
+        pipe.hset(trade_key, mapping=trade_data)
+        pipe.expire(trade_key, self.trades_ttl)
+        pipe.zadd(self.trades_key, {trade.transaction_hash: trade.timestamp})
         if trade.proxy_wallet:
-            await r.sadd(self.WALLETS_KEY, trade.proxy_wallet)
+            pipe.sadd(self.WALLETS_KEY, trade.proxy_wallet)
+        await pipe.execute()
 
     async def _update_extra_stats(self) -> None:
         try:
