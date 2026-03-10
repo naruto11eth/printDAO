@@ -1,5 +1,6 @@
 """Notification service for sending alerts to Telegram."""
 
+import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -213,13 +214,19 @@ class NotificationService:
         Returns:
             Number of successful sends
         """
-        success_count = 0
-        for chat_id in subscriber_ids:
+        semaphore = asyncio.Semaphore(20)
+
+        async def _send_one(chat_id: int) -> bool:
             if not await self.should_notify(chat_id):
-                continue
-            if await self.send_message(chat_id, text, topic_name):
-                success_count += 1
-        return success_count
+                return False
+            async with semaphore:
+                return await self.send_message(chat_id, text, topic_name)
+
+        results = await asyncio.gather(
+            *[_send_one(cid) for cid in subscriber_ids],
+            return_exceptions=True,
+        )
+        return sum(1 for r in results if r is True)
 
     def _format_whale_alert(self, alert: WhaleAlert) -> str:
         """Format a whale alert as HTML message."""
