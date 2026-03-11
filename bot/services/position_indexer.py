@@ -94,8 +94,7 @@ class PositionIndexer:
         self.poll_interval = poll_interval
         self._running = False
         self._task: Optional[asyncio.Task] = None
-        # Track all wallets being indexed
-        self._indexed_wallets: Dict[str, float] = {}  # address -> last_indexed_at
+        self._indexed_wallets_key = "position:indexed_wallets"
 
     def _position_key(self, exchange: str, address: str) -> str:
         """Get Redis key for current positions."""
@@ -145,7 +144,7 @@ class PositionIndexer:
         # For now, we'll track wallets that users have explicitly asked about
         # In the future, this could poll all tracked wallets
 
-        wallets_to_poll = list(self._indexed_wallets.keys())
+        wallets_to_poll = await self.redis.smembers(self._indexed_wallets_key)
 
         if not wallets_to_poll:
             return
@@ -154,15 +153,16 @@ class PositionIndexer:
 
         now = time.time()
         for address in wallets_to_poll:
-            last_indexed = self._indexed_wallets.get(address, 0)
+            last_key = f"position:last_indexed:{address}"
+            last_indexed = await self.redis.get(last_key)
+            last_time = float(last_indexed) if last_indexed else 0
 
-            # Only snapshot at the configured interval
-            if now - last_indexed < self.SNAPSHOT_INTERVAL:
+            if now - last_time < self.SNAPSHOT_INTERVAL:
                 continue
 
             try:
                 await self._index_hyperliquid_wallet(address)
-                self._indexed_wallets[address] = now
+                await self.redis.set(last_key, str(now))
             except Exception as e:
                 logger.warning(f"Failed to index {address}: {e}")
 
@@ -173,8 +173,8 @@ class PositionIndexer:
             address: Wallet address to start indexing
         """
         address_lower = address.lower()
-        if address_lower not in self._indexed_wallets:
-            self._indexed_wallets[address_lower] = 0
+        added = await self.redis.sadd(self._indexed_wallets_key, address_lower)
+        if added:
             logger.info(f"Added {address_lower} to position indexer")
 
     async def remove_wallet_from_index(self, address: str) -> None:
@@ -184,7 +184,7 @@ class PositionIndexer:
             address: Wallet address to stop indexing
         """
         address_lower = address.lower()
-        self._indexed_wallets.pop(address_lower, None)
+        await self.redis.srem(self._indexed_wallets_key, address_lower)
 
     async def _index_hyperliquid_wallet(self, address: str) -> None:
         """Index a Hyperliquid wallet's positions.
