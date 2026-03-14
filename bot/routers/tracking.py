@@ -374,6 +374,43 @@ async def cmd_deletegroup(message: Message, command: CommandObject, wallet_servi
         await message.reply(f"❌ {result.error}")
 
 
+@router.message(Command("track_bulk"))
+async def cmd_track_bulk(
+    message: Message, command: CommandObject, wallet_service: WalletService,
+) -> None:
+    """Track multiple wallet addresses at once.
+
+    Usage: /track_bulk <addr1> <addr2> ... (max 5 per command)
+    """
+    if not command.args:
+        await message.reply(
+            "<b>Usage:</b> /track_bulk &lt;addr1&gt; &lt;addr2&gt; ...\n\n"
+            "Max 5 addresses per command.",
+            parse_mode="HTML",
+        )
+        return
+
+    addresses = command.args.strip().split()[:5]
+    results = []
+
+    for addr in addresses:
+        if not is_valid_ethereum_address(addr):
+            results.append(f"<code>{addr[:10]}...</code> — invalid address")
+            continue
+
+        result = await wallet_service.track_wallet(
+            user_id=message.from_user.id,
+            address=addr,
+        )
+        short = shorten_address(addr)
+        if result.success:
+            results.append(f"<code>{short}</code> — tracked")
+        else:
+            results.append(f"<code>{short}</code> — {result.error}")
+
+    await message.reply("\n".join(results), parse_mode="HTML")
+
+
 # --- Callback Query Handlers ---
 
 @router.callback_query(F.data.startswith("track:"))
