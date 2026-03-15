@@ -27,7 +27,6 @@ class NotificationService:
         """
         self.bot = bot
         self.redis = redis_client
-        self._chat_topics: Dict[int, Dict[str, int]] = {}
 
     async def should_notify(self, user_id: int) -> bool:
         """Check if a user should receive notifications based on their preferences.
@@ -52,30 +51,22 @@ class NotificationService:
 
         return True
 
-    def register_topic(self, chat_id: int, topic_name: str, topic_id: int) -> None:
-        """Register a forum topic for a chat.
-
-        Args:
-            chat_id: Telegram chat ID
-            topic_name: Internal topic name (e.g., "hyperliquid", "polymarket")
-            topic_id: Telegram message_thread_id for the topic
-        """
-        if chat_id not in self._chat_topics:
-            self._chat_topics[chat_id] = {}
-        self._chat_topics[chat_id][topic_name] = topic_id
+    async def register_topic(self, chat_id: int, topic_name: str, topic_id: int) -> None:
+        """Register a forum topic for a chat. Persisted to Redis."""
+        if self.redis:
+            key = f"chat_topics:{chat_id}"
+            await self.redis.hset(key, topic_name, str(topic_id))
         logger.info(f"Registered topic {topic_name}={topic_id} for chat {chat_id}")
 
-    def get_topic_id(self, chat_id: int, topic_name: str) -> Optional[int]:
-        """Get topic ID for a chat.
-
-        Args:
-            chat_id: Telegram chat ID
-            topic_name: Internal topic name
-
-        Returns:
-            Topic ID or None if not registered
-        """
-        return self._chat_topics.get(chat_id, {}).get(topic_name)
+    async def get_topic_id(self, chat_id: int, topic_name: str) -> Optional[int]:
+        """Get topic ID for a chat from Redis."""
+        if not self.redis:
+            return None
+        key = f"chat_topics:{chat_id}"
+        value = await self.redis.hget(key, topic_name)
+        if value is not None:
+            return int(value)
+        return None
 
     async def send_message(
         self,
@@ -100,7 +91,7 @@ class NotificationService:
         try:
             message_thread_id = None
             if topic_name:
-                message_thread_id = self.get_topic_id(chat_id, topic_name)
+                message_thread_id = await self.get_topic_id(chat_id, topic_name)
 
             await self.bot.send_message(
                 chat_id=chat_id,

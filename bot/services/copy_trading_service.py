@@ -51,7 +51,6 @@ class CopyTradingService:
 
     def __init__(self, redis: RedisClient):
         self.redis = redis
-        self._signal_cache: Dict[str, float] = {}  # Dedup recent signals
 
     async def enable_copy_trading(
         self,
@@ -159,19 +158,10 @@ class CopyTradingService:
     ) -> Optional[CopyTradeSignal]:
         """Generate a copy trade signal from a detected trade."""
         # Check for duplicate signal
-        sig_key = f"{address}:{asset}:{action}:{notional_usd:.0f}"
-        if sig_key in self._signal_cache:
-            last_time = self._signal_cache[sig_key]
-            if time.time() - last_time < 60:  # 1 minute dedup window
-                return None
-
-        self._signal_cache[sig_key] = time.time()
-
-        # Clean old cache entries
-        now = time.time()
-        self._signal_cache = {
-            k: v for k, v in self._signal_cache.items() if now - v < 300
-        }
+        sig_key = f"copy:dedup:{address}:{asset}:{action}:{notional_usd:.0f}"
+        if await self.redis.exists(sig_key):
+            return None
+        await self.redis.set(sig_key, "1", ex=60)
 
         signal = CopyTradeSignal(
             source_wallet=address,

@@ -10,6 +10,7 @@ from aiogram.enums import ParseMode
 
 from bot.config import BotConfig, setup_logging
 from bot.utils.auth import configure_admin_ids
+from bot.routers.general import set_bot_start_time
 from bot.storage.redis_client import RedisClient
 from bot.services.wallet_service import WalletService
 from bot.services.notification_service import NotificationService
@@ -42,6 +43,7 @@ async def main() -> None:
     logger.info("Starting PrintDAO bot...")
 
     configure_admin_ids(config.admin_user_ids)
+    set_bot_start_time()
 
     # Initialize Redis
     redis_client = RedisClient(config.redis_url)

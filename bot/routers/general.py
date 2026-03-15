@@ -1,6 +1,7 @@
 """General commands router (help, start, etc.)."""
 
 import logging
+import time
 from typing import Optional
 
 from aiogram import Router
@@ -284,5 +285,94 @@ async def cmd_new_whales(
 
     if len(new_whales) > 10:
         lines.append(f"\n<i>... and {len(new_whales) - 10} more</i>")
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+_bot_start_time: float = 0.0
+
+
+def set_bot_start_time() -> None:
+    """Record bot startup time. Called once from main."""
+    global _bot_start_time
+    _bot_start_time = time.time()
+
+
+@router.message(Command("health"))
+async def cmd_health(
+    message: Message,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Report bot health status."""
+    lines = ["<b>PrintDAO Health Check</b>\n"]
+
+    uptime_s = time.time() - _bot_start_time if _bot_start_time else 0
+    hours = int(uptime_s // 3600)
+    minutes = int((uptime_s % 3600) // 60)
+    lines.append(f"Uptime: {hours}h {minutes}m")
+
+    if redis_client:
+        try:
+            await redis_client.redis.ping()
+            lines.append("Redis: connected")
+        except Exception:
+            lines.append("Redis: DISCONNECTED")
+    else:
+        lines.append("Redis: not configured")
+
+    if redis_client:
+        hl_stats = await redis_client.get("hl:indexer:stats")
+        if hl_stats and isinstance(hl_stats, dict):
+            lines.append(
+                f"\nHL Indexer: {hl_stats.get('total_trades_indexed', '?')} trades, "
+                f"{hl_stats.get('errors', '0')} errors"
+            )
+        else:
+            lines.append("\nHL Indexer: no data")
+
+        pm_stats = await redis_client.get("pm:indexer:stats")
+        if pm_stats and isinstance(pm_stats, dict):
+            lines.append(
+                f"PM Indexer: {pm_stats.get('total_trades_indexed', '?')} trades, "
+                f"{pm_stats.get('errors', '0')} errors"
+            )
+        else:
+            lines.append("PM Indexer: no data")
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("metrics"))
+@admin_required
+async def cmd_metrics(
+    message: Message,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Show operational metrics (admin only)."""
+    if not redis_client:
+        await message.reply("Redis not available.")
+        return
+
+    lines = ["<b>PrintDAO Metrics</b>\n"]
+
+    for prefix, name in [("hl", "Hyperliquid"), ("pm", "Polymarket")]:
+        stats = await redis_client.get(f"{prefix}:indexer:stats")
+        if not stats or not isinstance(stats, dict):
+            lines.append(f"<b>{name}:</b> no data\n")
+            continue
+
+        lines.append(f"<b>{name}:</b>")
+        lines.append(f"  Trades indexed: {stats.get('total_trades_indexed', 0)}")
+        lines.append(f"  Trades/min: {stats.get('trades_last_minute', 0)}")
+        lines.append(f"  Trades/hour: {stats.get('trades_last_hour', 0)}")
+        lines.append(f"  Whale trades: {stats.get('whale_trades', 0)}")
+        lines.append(f"  Volume: ${float(stats.get('total_volume_usd', 0)):,.0f}")
+        lines.append(f"  Errors: {stats.get('errors', 0)}")
+        lines.append(f"  Last trade: {stats.get('last_trade_time', 'N/A')}")
+
+        trade_count = await redis_client.redis.zcard(f"{prefix}:trades")
+        whale_count = await redis_client.redis.zcard(f"{prefix}:whales")
+        lines.append(f"  Redis trades set: {trade_count}")
+        lines.append(f"  Redis whales set: {whale_count}\n")
 
     await message.reply("\n".join(lines), parse_mode="HTML")
