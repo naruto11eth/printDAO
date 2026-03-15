@@ -2,8 +2,9 @@
 
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 from bot.storage.redis_client import RedisClient
 
@@ -110,10 +111,10 @@ class ConfigurableWhaleDetector:
         """
         self.redis = redis_client
         self.config = config or WhaleConfig()
-        # In-memory cache of profiles for faster lookups
         self._profile_cache: Dict[str, WalletProfile] = {}
-        # Track alerted wallets to prevent spam
-        self._recent_alerts: Set[str] = set()
+        self._profile_cache_max = 10_000
+        self._recent_alerts: OrderedDict[str, float] = OrderedDict()
+        self._recent_alerts_max = 5_000
 
     def _profile_key(self, exchange: str, address: str) -> str:
         """Get Redis key for wallet profile."""
@@ -187,6 +188,9 @@ class ConfigurableWhaleDetector:
             )
 
         self._profile_cache[cache_key] = profile
+        if len(self._profile_cache) > self._profile_cache_max:
+            oldest_key = next(iter(self._profile_cache))
+            del self._profile_cache[oldest_key]
         return profile
 
     async def update_profile(

@@ -14,5 +14,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Run the bot
+# Railway/Docker sends SIGTERM; Python asyncio.run() handles SIGINT for graceful shutdown
+STOPSIGNAL SIGINT
 CMD ["python", "-m", "bot.main"]

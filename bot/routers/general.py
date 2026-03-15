@@ -9,6 +9,7 @@ from aiogram.filters import Command, CommandStart, CommandObject
 
 from bot.storage.redis_client import RedisClient
 from bot.services.whale_detector import ConfigurableWhaleDetector
+from bot.utils.auth import admin_required
 from shared.utils import format_usd
 
 logger = logging.getLogger(__name__)
@@ -146,6 +147,7 @@ async def cmd_whale_config(
 
 
 @router.message(Command("set_whale_threshold"))
+@admin_required
 async def cmd_set_whale_threshold(
     message: Message,
     command: CommandObject,
@@ -216,6 +218,7 @@ async def cmd_set_whale_threshold(
 
 
 @router.message(Command("toggle_new_whale"))
+@admin_required
 async def cmd_toggle_new_whale(
     message: Message,
     whale_detector: Optional[ConfigurableWhaleDetector] = None,

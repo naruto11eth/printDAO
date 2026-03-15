@@ -39,6 +39,9 @@ class BotConfig:
     max_tracked_wallets_per_user: int = 20
     max_groups_per_user: int = 10
 
+    # Admin
+    admin_user_ids: set[int] = field(default_factory=set)
+
     # Logging
     log_level: str = "INFO"
 
@@ -86,8 +89,21 @@ class BotConfig:
             max_tracked_wallets_per_user=int(
                 os.getenv("MAX_TRACKED_WALLETS_PER_USER", "20")
             ),
+            admin_user_ids=cls._parse_admin_ids(os.getenv("ADMIN_USER_IDS", "")),
             log_level=os.getenv("LOG_LEVEL", "INFO"),
         )
+
+    @staticmethod
+    def _parse_admin_ids(raw: str) -> set[int]:
+        """Parse comma-separated admin user IDs from env var."""
+        if not raw.strip():
+            return set()
+        ids = set()
+        for part in raw.split(","):
+            part = part.strip()
+            if part.isdigit():
+                ids.add(int(part))
+        return ids
 
     def validate(self) -> bool:
         """Validate that required config is present."""

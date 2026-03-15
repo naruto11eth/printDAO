@@ -1,16 +1,19 @@
 """Wallet tracking commands router."""
 
 import logging
+import re
 
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, CommandObject
 
 from bot.services.wallet_service import WalletService
-from shared.utils import shorten_address, parse_command_args, is_valid_ethereum_address
+from shared.utils import shorten_address, parse_command_args, is_valid_ethereum_address, escape_html
 from shared.constants import EXCHANGES
 
 logger = logging.getLogger(__name__)
+
+_LABEL_PATTERN = re.compile(r"^[\w\-]+$")
 
 router = Router(name="tracking")
 
@@ -49,7 +52,12 @@ async def cmd_track(message: Message, command: CommandObject, wallet_service: Wa
     label = parsed["positional"][1] if len(parsed["positional"]) > 1 else None
     exchange = parsed["flags"].get("exchange", "all")
 
-    # Track wallet
+    if label and (len(label) > 32 or not _LABEL_PATTERN.match(label)):
+        await message.reply(
+            "Label must be 1-32 characters, alphanumeric/underscore/hyphen only."
+        )
+        return
+
     result = await wallet_service.track_wallet(
         user_id=message.from_user.id,
         address=address,
@@ -60,7 +68,7 @@ async def cmd_track(message: Message, command: CommandObject, wallet_service: Wa
     if result.success:
         wallet = result.data
         short_addr = shorten_address(wallet.address)
-        label_str = f" ({wallet.label})" if wallet.label else ""
+        label_str = f" ({escape_html(wallet.label)})" if wallet.label else ""
         exchange_str = f" [{wallet.exchange}]" if wallet.exchange != "all" else ""
 
         await message.reply(
@@ -103,7 +111,7 @@ async def cmd_untrack(message: Message, command: CommandObject, wallet_service: 
     if result.success:
         wallet = result.data
         short_addr = shorten_address(wallet.address)
-        label_str = f" ({wallet.label})" if wallet.label else ""
+        label_str = f" ({escape_html(wallet.label)})" if wallet.label else ""
 
         await message.reply(
             f"✅ Stopped tracking: <code>{short_addr}</code>{label_str}\n\n"
@@ -171,7 +179,7 @@ async def cmd_list(message: Message, command: CommandObject, wallet_service: Wal
 
     for i, wallet in enumerate(wallets, 1):
         short_addr = shorten_address(wallet.address)
-        label_str = f" ({wallet.label})" if wallet.label else ""
+        label_str = f" ({escape_html(wallet.label)})" if wallet.label else ""
         exchange_str = f" [{wallet.exchange}]" if wallet.exchange != "all" else ""
 
         lines.append(f"{i}. <code>{short_addr}</code>{label_str}{exchange_str}")
@@ -219,9 +227,9 @@ async def cmd_creategroup(message: Message, command: CommandObject, wallet_servi
     if result.success:
         group = result.data
         await message.reply(
-            f"✅ Created group: <b>{group.name}</b>\n"
+            f"✅ Created group: <b>{escape_html(group.name)}</b>\n"
             f"ID: <code>{group.id}</code>\n\n"
-            f"Use /addtogroup {group.name} &lt;wallet&gt; to add wallets.",
+            f"Use /addtogroup {escape_html(group.name)} &lt;wallet&gt; to add wallets.",
             parse_mode="HTML",
         )
     else:
@@ -245,9 +253,9 @@ async def cmd_groups(message: Message, wallet_service: WalletService) -> None:
 
     for group in groups:
         wallet_count = len(group.wallet_addresses)
-        desc = f" - {group.description}" if group.description else ""
+        desc = f" - {escape_html(group.description)}" if group.description else ""
         lines.append(
-            f"<b>{group.name}</b> (<code>{group.id}</code>)\n"
+            f"<b>{escape_html(group.name)}</b> (<code>{group.id}</code>)\n"
             f"  {wallet_count} wallet(s){desc}"
         )
 
@@ -275,12 +283,12 @@ async def cmd_groupinfo(message: Message, command: CommandObject, wallet_service
         return
 
     lines = [
-        f"<b>📁 Group: {group.name}</b>",
+        f"<b>📁 Group: {escape_html(group.name)}</b>",
         f"ID: <code>{group.id}</code>",
     ]
 
     if group.description:
-        lines.append(f"Description: {group.description}")
+        lines.append(f"Description: {escape_html(group.description)}")
 
     lines.append(f"\n<b>Wallets ({len(group.wallet_addresses)}):</b>")
 
@@ -291,7 +299,7 @@ async def cmd_groupinfo(message: Message, command: CommandObject, wallet_service
     else:
         lines.append("<i>No wallets in this group yet.</i>")
 
-    lines.append(f"\n<i>Use /addtogroup {group.name} &lt;wallet&gt; to add more</i>")
+    lines.append(f"\n<i>Use /addtogroup {escape_html(group.name)} &lt;wallet&gt; to add more</i>")
 
     await message.reply("\n".join(lines), parse_mode="HTML")
 
@@ -331,7 +339,7 @@ async def cmd_addtogroup(message: Message, command: CommandObject, wallet_servic
         group = result.data
         short_addr = shorten_address(address)
         await message.reply(
-            f"✅ Added <code>{short_addr}</code> to group <b>{group.name}</b>",
+            f"✅ Added <code>{short_addr}</code> to group <b>{escape_html(group.name)}</b>",
             parse_mode="HTML",
         )
     else:
@@ -358,7 +366,7 @@ async def cmd_deletegroup(message: Message, command: CommandObject, wallet_servi
     if result.success:
         group = result.data
         await message.reply(
-            f"✅ Deleted group: <b>{group.name}</b>\n\n"
+            f"✅ Deleted group: <b>{escape_html(group.name)}</b>\n\n"
             f"Wallets in this group are still being tracked.",
             parse_mode="HTML",
         )

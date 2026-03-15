@@ -1,12 +1,13 @@
 """Notification service for sending alerts to Telegram."""
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from bot.storage.models import WhaleAlert, CopyTradeSignal
+from bot.storage.models import WhaleAlert, CopyTradeSignal, NotificationPreference
 from shared.utils import shorten_address, format_usd, format_percentage
 
 logger = logging.getLogger(__name__)
@@ -15,15 +16,39 @@ logger = logging.getLogger(__name__)
 class NotificationService:
     """Handles sending notifications to Telegram chats/topics."""
 
-    def __init__(self, bot: Bot):
+    def __init__(self, bot: Bot, redis_client=None):
         """Initialize notification service.
 
         Args:
             bot: aiogram Bot instance
+            redis_client: Optional RedisClient for checking user preferences
         """
         self.bot = bot
-        # Store topic IDs per chat (chat_id -> {topic_name: topic_id})
+        self.redis = redis_client
         self._chat_topics: Dict[int, Dict[str, int]] = {}
+
+    async def should_notify(self, user_id: int) -> bool:
+        """Check if a user should receive notifications based on their preferences.
+
+        Returns True if notifications should be sent, False if muted or disabled.
+        """
+        if not self.redis:
+            return True
+
+        prefs_data = await self.redis.get(f"user:{user_id}:preferences")
+        if not prefs_data:
+            return True
+
+        if isinstance(prefs_data, dict):
+            pref = prefs_data.get("notification_preference", "all")
+            if pref == NotificationPreference.NONE.value:
+                return False
+
+            muted_until = prefs_data.get("muted_until")
+            if muted_until and float(muted_until) > time.time():
+                return False
+
+        return True
 
     def register_topic(self, chat_id: int, topic_name: str, topic_id: int) -> None:
         """Register a forum topic for a chat.
@@ -103,8 +128,10 @@ class NotificationService:
         Returns:
             True if sent successfully
         """
-        # Determine which topic to use
-        topic_name = alert.exchange  # "hyperliquid" or "polymarket"
+        if not await self.should_notify(chat_id):
+            return False
+
+        topic_name = alert.exchange
 
         # Format the alert message
         text = self._format_whale_alert(alert)
@@ -187,6 +214,8 @@ class NotificationService:
         """
         success_count = 0
         for chat_id in subscriber_ids:
+            if not await self.should_notify(chat_id):
+                continue
             if await self.send_message(chat_id, text, topic_name):
                 success_count += 1
         return success_count

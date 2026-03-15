@@ -13,4 +13,5 @@ COPY . .
 
 ENV HEADLESS=1
 
+STOPSIGNAL SIGINT
 CMD ["python", "run_indexer.py"]

@@ -809,6 +809,8 @@ async def cmd_hl_analytics(
     command: CommandObject,
     hyperliquid_client: Optional[HyperliquidClient] = None,
     redis_client: Optional[RedisClient] = None,
+    analytics_service: Optional[AnalyticsService] = None,
+    wallet_service=None,
 ) -> None:
     """Show TrySuper-style trader analytics with action buttons.
 
@@ -841,21 +843,17 @@ async def cmd_hl_analytics(
     await message.bot.send_chat_action(message.chat.id, "typing")
 
     try:
-        # Use analytics service
-        analytics_service = AnalyticsService(hyperliquid_client, redis_client)
-        analytics = await analytics_service.get_trader_analytics(address, "hyperliquid")
+        svc = analytics_service or AnalyticsService(hyperliquid_client, redis_client)
+        analytics = await svc.get_trader_analytics(address, "hyperliquid")
 
-        # Format with TrySuper.co style
         text = format_trader_analytics(analytics)
 
-        # Check if wallet is tracked (simplified check)
         is_tracked = False
-        if redis_client:
-            tracked_key = f"tracked:hl:{message.from_user.id}"
-            tracked_wallets = await redis_client.redis.smembers(tracked_key)
-            is_tracked = address.lower() in [w.lower() for w in tracked_wallets]
+        if wallet_service:
+            is_tracked = await wallet_service.is_tracking(
+                message.from_user.id, address
+            )
 
-        # Build inline keyboard with actions
         keyboard = build_trader_actions_keyboard(address, "hyperliquid", is_tracked)
 
         await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
@@ -873,6 +871,8 @@ async def callback_refresh_analytics(
     callback_data: TraderAction,
     hyperliquid_client: Optional[HyperliquidClient] = None,
     redis_client: Optional[RedisClient] = None,
+    analytics_service: Optional[AnalyticsService] = None,
+    wallet_service=None,
 ) -> None:
     """Refresh trader analytics."""
     await callback.answer("Refreshing...")
@@ -881,31 +881,27 @@ async def callback_refresh_analytics(
         await callback.answer("Client not available", show_alert=True)
         return
 
-    # Reconstruct full address from stored addresses
     addr_short = callback_data.address
-    # For now, we'll need to look up the full address or store it
-    # This is a simplified version - in production you'd store the mapping
-    address = addr_short  # Placeholder - needs full address lookup
+    address = addr_short
 
-    # Check if we have the full address in Redis
     if redis_client:
-        full_addr = await redis_client.redis.get(f"addr_map:{addr_short}")
+        full_addr = await redis_client.get(f"addr_map:{addr_short}")
         if full_addr:
             address = full_addr
 
     try:
-        analytics_service = AnalyticsService(hyperliquid_client, redis_client)
-        analytics = await analytics_service.get_trader_analytics(
+        svc = analytics_service or AnalyticsService(hyperliquid_client, redis_client)
+        analytics = await svc.get_trader_analytics(
             address, "hyperliquid", force_refresh=True
         )
 
         text = format_trader_analytics(analytics)
 
         is_tracked = False
-        if redis_client:
-            tracked_key = f"tracked:hl:{callback.from_user.id}"
-            tracked_wallets = await redis_client.redis.smembers(tracked_key)
-            is_tracked = address.lower() in [w.lower() for w in tracked_wallets]
+        if wallet_service:
+            is_tracked = await wallet_service.is_tracking(
+                callback.from_user.id, address
+            )
 
         keyboard = build_trader_actions_keyboard(address, "hyperliquid", is_tracked)
 
@@ -919,58 +915,63 @@ async def callback_refresh_analytics(
 async def callback_track_wallet(
     callback: CallbackQuery,
     callback_data: TraderAction,
+    wallet_service=None,
     redis_client: Optional[RedisClient] = None,
 ) -> None:
-    """Track a wallet for alerts."""
-    if not redis_client:
-        await callback.answer("Redis not available", show_alert=True)
+    """Track a wallet for alerts via WalletService."""
+    if not wallet_service:
+        await callback.answer("Wallet service not available", show_alert=True)
         return
 
     address = callback_data.address
     user_id = callback.from_user.id
+    exchange = callback_data.exchange
 
-    # Add to tracked set
-    tracked_key = f"tracked:{callback_data.exchange[:2]}:{user_id}"
-    await redis_client.redis.sadd(tracked_key, address)
+    result = await wallet_service.track_wallet(
+        user_id=user_id,
+        address=address,
+        exchange=exchange,
+    )
 
-    # Store address mapping for later lookups
-    await redis_client.redis.set(f"addr_map:{address[:20]}", address, ex=86400 * 30)
-
-    await callback.answer(f"Now tracking {address[:10]}...", show_alert=True)
-
-    # Update keyboard to show untrack button
-    try:
-        keyboard = build_trader_actions_keyboard(address, callback_data.exchange, is_tracked=True)
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
-    except Exception:
-        pass
+    if result.success:
+        if redis_client:
+            await redis_client.set(f"addr_map:{address[:20]}", address, ex=86400 * 30)
+        await callback.answer(f"Now tracking {address[:10]}...", show_alert=True)
+        try:
+            keyboard = build_trader_actions_keyboard(address, exchange, is_tracked=True)
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
+        except Exception:
+            pass
+    else:
+        await callback.answer(result.error or "Failed to track", show_alert=True)
 
 
 @router.callback_query(TraderAction.filter(F.action == "untrack"))
 async def callback_untrack_wallet(
     callback: CallbackQuery,
     callback_data: TraderAction,
-    redis_client: Optional[RedisClient] = None,
+    wallet_service=None,
 ) -> None:
-    """Stop tracking a wallet."""
-    if not redis_client:
-        await callback.answer("Redis not available", show_alert=True)
+    """Stop tracking a wallet via WalletService."""
+    if not wallet_service:
+        await callback.answer("Wallet service not available", show_alert=True)
         return
 
     address = callback_data.address
     user_id = callback.from_user.id
+    exchange = callback_data.exchange
 
-    tracked_key = f"tracked:{callback_data.exchange[:2]}:{user_id}"
-    await redis_client.redis.srem(tracked_key, address)
+    result = await wallet_service.untrack_wallet(user_id, address)
 
-    await callback.answer(f"Stopped tracking {address[:10]}...", show_alert=True)
-
-    # Update keyboard
-    try:
-        keyboard = build_trader_actions_keyboard(address, callback_data.exchange, is_tracked=False)
-        await callback.message.edit_reply_markup(reply_markup=keyboard)
-    except Exception:
-        pass
+    if result.success:
+        await callback.answer(f"Stopped tracking {address[:10]}...", show_alert=True)
+        try:
+            keyboard = build_trader_actions_keyboard(address, exchange, is_tracked=False)
+            await callback.message.edit_reply_markup(reply_markup=keyboard)
+        except Exception:
+            pass
+    else:
+        await callback.answer(result.error or "Failed to untrack", show_alert=True)
 
 
 @router.callback_query(TraderAction.filter(F.action == "positions"))

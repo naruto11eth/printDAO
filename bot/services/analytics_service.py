@@ -3,7 +3,7 @@
 import logging
 import time
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import List, Optional, Dict, Any
 
@@ -258,8 +258,8 @@ class AnalyticsService:
 
         # Find oldest fill
         oldest = min(fills, key=lambda f: f.time_ms)
-        first_trade_time = datetime.fromtimestamp(oldest.time_ms / 1000)
-        age = datetime.now() - first_trade_time
+        first_trade_time = datetime.fromtimestamp(oldest.time_ms / 1000, tz=timezone.utc)
+        age = datetime.now(tz=timezone.utc) - first_trade_time
         return max(1, age.days)
 
     def _calculate_total_pnl(self, fills: List[Fill]) -> float:
@@ -445,7 +445,7 @@ class AnalyticsService:
 
         # Filter fills by time period
         if days is not None:
-            cutoff = datetime.now() - timedelta(days=days)
+            cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
             period_fills = [f for f in fills if f.datetime >= cutoff]
         else:
             period_fills = fills

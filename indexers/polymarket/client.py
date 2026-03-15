@@ -62,31 +62,41 @@ class PolymarketClient:
         method: str,
         url: str,
         params: Optional[dict] = None,
+        _max_retries: int = 5,
     ) -> dict | list:
-        """Make a rate-limited request."""
-        await self.rate_limiter.acquire()
-
+        """Make a rate-limited request with bounded retry on 429."""
         session = await self._get_session()
 
-        try:
-            async with session.request(method, url, params=params) as response:
-                if response.status == 200:
-                    return await response.json()
-                elif response.status == 429:
-                    # Rate limited, wait and retry
-                    logger.warning("Rate limited, waiting 5 seconds...")
-                    await asyncio.sleep(5)
-                    return await self._request(method, url, params)
-                else:
-                    text = await response.text()
-                    logger.error(f"API error {response.status}: {text}")
-                    return []
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout fetching {url}")
-            return []
-        except Exception as e:
-            logger.error(f"Error fetching {url}: {e}")
-            return []
+        for attempt in range(_max_retries):
+            await self.rate_limiter.acquire()
+            try:
+                async with session.request(method, url, params=params) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    elif response.status == 429:
+                        delay = min(5 * (2 ** attempt), 60)
+                        logger.warning(
+                            f"Rate limited (attempt {attempt + 1}/{_max_retries}), "
+                            f"retrying in {delay}s"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    else:
+                        text = await response.text()
+                        logger.error(f"API error {response.status}: {text}")
+                        return []
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout fetching {url} (attempt {attempt + 1})")
+                if attempt < _max_retries - 1:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                return []
+            except Exception as e:
+                logger.error(f"Error fetching {url}: {e}")
+                return []
+
+        logger.error(f"Max retries ({_max_retries}) exceeded for {url}")
+        return []
 
     async def get_positions(
         self,
