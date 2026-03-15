@@ -75,7 +75,7 @@ class CopyTradingService:
 
         # Add to wallet's subscriber set for efficient notifications
         subs_key = f"copy:subs:{address.lower()}"
-        await self.redis.redis.sadd(subs_key, str(user_id))
+        await self.redis.sadd(subs_key, str(user_id))
 
         logger.info(f"Enabled copy trading: user={user_id}, wallet={address[:10]}...")
         return config
@@ -98,7 +98,7 @@ class CopyTradingService:
 
         # Remove from subscriber set
         subs_key = f"copy:subs:{address.lower()}"
-        await self.redis.redis.srem(subs_key, str(user_id))
+        await self.redis.srem(subs_key, str(user_id))
 
         logger.info(f"Disabled copy trading: user={user_id}, wallet={address[:10]}...")
         return True
@@ -123,7 +123,7 @@ class CopyTradingService:
     ) -> List[CopyTraderConfig]:
         """Get all wallets user is copy trading."""
         pattern = f"copy:{user_id}:*"
-        keys = await self.redis.redis.keys(pattern)
+        keys = await self.redis.scan_keys(pattern)
 
         configs = []
         for key in keys:
@@ -139,7 +139,7 @@ class CopyTradingService:
     ) -> Set[int]:
         """Get all users subscribed to copy trade a wallet."""
         subs_key = f"copy:subs:{address.lower()}"
-        members = await self.redis.redis.smembers(subs_key)
+        members = await self.redis.smembers(subs_key)
 
         return {int(m.decode() if isinstance(m, bytes) else m) for m in members}
 
@@ -196,7 +196,7 @@ class CopyTradingService:
         """Store signal in Redis for history."""
         # Store in wallet's signal history
         key = f"copy:signals:{signal.source_wallet.lower()}"
-        await self.redis.redis.zadd(
+        await self.redis.zadd(
             key,
             {signal.id: signal.timestamp}
         )
@@ -206,7 +206,7 @@ class CopyTradingService:
         await self.redis.set(detail_key, signal.to_dict(), ex=86400 * 7)  # 7 day TTL
 
         # Trim to last 100 signals
-        await self.redis.redis.zremrangebyrank(key, 0, -101)
+        await self.redis.zremrangebyrank(key, 0, -101)
 
     async def get_recent_signals(
         self,
@@ -215,7 +215,7 @@ class CopyTradingService:
     ) -> List[CopyTradeSignal]:
         """Get recent signals for a wallet."""
         key = f"copy:signals:{address.lower()}"
-        signal_ids = await self.redis.redis.zrange(key, -limit, -1, desc=True)
+        signal_ids = await self.redis.zrange(key, -limit, -1, desc=True)
 
         signals = []
         for sid in signal_ids:

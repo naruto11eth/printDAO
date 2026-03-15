@@ -237,7 +237,7 @@ class PositionIndexer:
 
         # Prune old history entries
         cutoff = time.time() - self.POSITION_HISTORY_TTL
-        await self.redis.redis.zremrangebyscore(history_key, 0, cutoff)
+        await self.redis.zremrangebyscore(history_key, 0, cutoff)
 
     async def get_current_snapshot(
         self,
@@ -278,7 +278,7 @@ class PositionIndexer:
         cutoff = time.time() - (since_hours * 3600)
 
         # Get timestamps from sorted set
-        timestamps = await self.redis.redis.zrangebyscore(
+        timestamps = await self.redis.zrangebyscore(
             history_key,
             cutoff,
             "+inf",

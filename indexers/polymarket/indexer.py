@@ -90,34 +90,27 @@ class PolymarketIndexer:
         while self._running:
             try:
                 pattern = REDIS_KEYS["user_wallets"].format(user_id="*")
-                cursor = b"0"
-                while True:
-                    cursor, keys = await self.redis.redis.scan(
-                        cursor=cursor, match=pattern, count=100
-                    )
-                    for key in keys:
-                        key_str = key if isinstance(key, str) else key.decode()
-                        match = _USER_WALLETS_KEY_PATTERN.search(key_str)
-                        if not match:
-                            continue
-                        user_id = int(match.group(1))
+                keys = await self.redis.scan_keys(pattern)
 
-                        wallets_data = await self.redis.hgetall(key_str)
-                        for wallet_key, wallet_data in wallets_data.items():
-                            try:
-                                if isinstance(wallet_data, str):
-                                    wallet_data = json.loads(wallet_data)
-                                wallet = TrackedWallet.from_dict(wallet_data)
+                for key_str in keys:
+                    match = _USER_WALLETS_KEY_PATTERN.search(key_str)
+                    if not match:
+                        continue
+                    user_id = int(match.group(1))
 
-                                if wallet.exchange not in ("polymarket", "all"):
-                                    continue
+                    wallets_data = await self.redis.hgetall(key_str)
+                    for wallet_key, wallet_data in wallets_data.items():
+                        try:
+                            if isinstance(wallet_data, str):
+                                wallet_data = json.loads(wallet_data)
+                            wallet = TrackedWallet.from_dict(wallet_data)
 
-                                await self._check_wallet_activity(wallet, user_id)
-                            except Exception as e:
-                                logger.error(f"Error processing wallet {wallet_key}: {e}")
+                            if wallet.exchange not in ("polymarket", "all"):
+                                continue
 
-                    if cursor == 0 or cursor == b"0":
-                        break
+                            await self._check_wallet_activity(wallet, user_id)
+                        except Exception as e:
+                            logger.error(f"Error processing wallet {wallet_key}: {e}")
 
                 await asyncio.sleep(self.poll_interval)
 
@@ -220,7 +213,7 @@ class PolymarketIndexer:
             trade: The whale trade
         """
         subscribers_key = "pm:whale_subscribers"
-        subscribers = await self.redis.redis.smembers(subscribers_key)
+        subscribers = await self.redis.smembers(subscribers_key)
 
         if not subscribers:
             return

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
 from bot.storage.redis_client import RedisClient
+from shared.models import safe_from_dict
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +33,7 @@ class WhaleConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "WhaleConfig":
-        """Create from dictionary."""
-        return cls(**data)
+        return safe_from_dict(cls, data)
 
 
 @dataclass
@@ -64,8 +64,7 @@ class WalletProfile:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "WalletProfile":
-        """Create from dictionary."""
-        return cls(**data)
+        return safe_from_dict(cls, data)
 
 
 @dataclass

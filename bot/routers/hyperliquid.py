@@ -9,6 +9,7 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.filters import Command, CommandObject
 
 from shared.utils import shorten_address, is_valid_ethereum_address, escape_html
+from shared.formatting import format_usd, format_percent, format_pnl
 from indexers.hyperliquid import HyperliquidClient, Direction
 from bot.services.position_indexer import PositionIndexer
 from bot.services.analytics_service import AnalyticsService, format_trader_analytics
@@ -26,39 +27,9 @@ logger = logging.getLogger(__name__)
 router = Router(name="hyperliquid")
 
 
-def format_usd(value: Decimal | float) -> str:
-    """Format USD value with sign."""
-    val = float(value) if isinstance(value, Decimal) else value
-    if val >= 0:
-        return f"+${val:,.2f}"
-    return f"-${abs(val):,.2f}"
-
-
 def format_usd_short(value: Decimal | float) -> str:
     """Format USD value in short form (K/M)."""
-    val = float(value) if isinstance(value, Decimal) else value
-    if abs(val) >= 1_000_000:
-        return f"${val / 1_000_000:,.2f}M"
-    elif abs(val) >= 1_000:
-        return f"${val / 1_000:,.1f}K"
-    return f"${val:,.2f}"
-
-
-def format_percent(value: Decimal | float) -> str:
-    """Format percentage with sign."""
-    val = float(value) if isinstance(value, Decimal) else value
-    if val >= 0:
-        return f"+{val:.2f}%"
-    return f"{val:.2f}%"
-
-
-def format_pnl(usd_value: Decimal | float, percent_value: Decimal | float) -> str:
-    """Format PNL as USD with percentage in parentheses."""
-    usd = float(usd_value) if isinstance(usd_value, Decimal) else usd_value
-    pct = float(percent_value) if isinstance(percent_value, Decimal) else percent_value
-    usd_str = f"+${usd:,.2f}" if usd >= 0 else f"-${abs(usd):,.2f}"
-    pct_str = f"+{pct:.1f}%" if pct >= 0 else f"{pct:.1f}%"
-    return f"{usd_str} ({pct_str})"
+    return format_usd(value, short=True)
 
 
 @router.message(Command("hl_trades"))
@@ -336,7 +307,7 @@ async def cmd_hl_positions(
             f"<code>{shorten_address(address)}</code>\n",
             f"<b>Account Value:</b> ${float(state.account_value):,.2f}",
             f"<b>Margin Used:</b> ${float(state.total_margin_used):,.2f}",
-            f"{pnl_emoji} <b>Total PnL:</b> {format_usd(total_pnl)}\n",
+            f"{pnl_emoji} <b>Total PnL:</b> {format_usd(total_pnl, sign=True)}\n",
             f"<b>Positions ({len(state.positions)}):</b>",
         ]
 
@@ -418,9 +389,9 @@ async def cmd_hl_pnl(
             f"<code>{shorten_address(address)}</code>\n",
             f"<b>Account Value:</b> ${float(state.account_value):,.2f}",
             f"<b>Withdrawable:</b> ${float(state.withdrawable):,.2f}\n",
-            f"{pnl_emoji} <b>Total PnL:</b> {format_usd(total_pnl)}",
-            f"<b>Realized:</b> {format_usd(realized_pnl)}",
-            f"<b>Unrealized:</b> {format_usd(unrealized_pnl)}\n",
+            f"{pnl_emoji} <b>Total PnL:</b> {format_usd(total_pnl, sign=True)}",
+            f"<b>Realized:</b> {format_usd(realized_pnl, sign=True)}",
+            f"<b>Unrealized:</b> {format_usd(unrealized_pnl, sign=True)}\n",
             f"<b>Recent Trades:</b> {len(fills)}",
             f"<b>Win Rate:</b> {win_rate:.1f}%",
             f"<b>W/L:</b> {len(winning)}W / {len(losing)}L",
@@ -432,9 +403,9 @@ async def cmd_hl_pnl(
             worst = min(fills, key=lambda f: f.closed_pnl)
 
             if best.closed_pnl > 0:
-                lines.append(f"\n🏆 <b>Best:</b> {best.coin} {format_usd(best.closed_pnl)}")
+                lines.append(f"\n🏆 <b>Best:</b> {best.coin} {format_usd(best.closed_pnl, sign=True)}")
             if worst.closed_pnl < 0:
-                lines.append(f"💀 <b>Worst:</b> {worst.coin} {format_usd(worst.closed_pnl)}")
+                lines.append(f"💀 <b>Worst:</b> {worst.coin} {format_usd(worst.closed_pnl, sign=True)}")
 
         await message.reply("\n".join(lines), parse_mode="HTML")
 
@@ -502,7 +473,7 @@ async def cmd_hl_fills(
 
             time_str = fill.datetime.strftime("%m/%d %H:%M")
             notional = format_usd_short(fill.notional_usd)
-            pnl_str = f" | PnL: {format_usd(fill.closed_pnl)}" if fill.closed_pnl != 0 else ""
+            pnl_str = f" | PnL: {format_usd(fill.closed_pnl, sign=True)}" if fill.closed_pnl != 0 else ""
 
             lines.append(
                 f"{dir_emoji} <b>{fill.coin}</b> {escape_html(fill.direction)}\n"
@@ -1051,13 +1022,13 @@ async def callback_show_pnl(
             time_str = fill.datetime.strftime("%m/%d %H:%M")
 
             lines.append(
-                f"{pnl_emoji} <b>{fill.coin}</b> {format_usd(fill.closed_pnl)}\n"
+                f"{pnl_emoji} <b>{fill.coin}</b> {format_usd(fill.closed_pnl, sign=True)}\n"
                 f"   {time_str}"
             )
 
         total = sum(float(f.closed_pnl) for f in fills)
         total_emoji = "🟢" if total >= 0 else "🔴"
-        lines.append(f"\n{total_emoji} <b>Total:</b> {format_usd(total)}")
+        lines.append(f"\n{total_emoji} <b>Total:</b> {format_usd(total, sign=True)}")
 
         await callback.message.answer("\n".join(lines), parse_mode="HTML")
 

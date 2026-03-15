@@ -16,17 +16,11 @@ from bot.storage.models import (
     WhaleDetectionConfig,
     NotificationPreference,
 )
-from shared.constants import EXCHANGES
+from shared.constants import EXCHANGES, INTERVAL_LIMITS
 
 logger = logging.getLogger(__name__)
 
 router = Router(name="settings")
-
-# Interval limits per exchange
-INTERVAL_LIMITS = {
-    "hyperliquid": {"min": 30, "max": 3600, "default": 60},
-    "polymarket": {"min": 60, "max": 3600, "default": 300},
-}
 
 
 class SettingsAction(CallbackData, prefix="settings"):
