@@ -7,9 +7,12 @@ from datetime import datetime, timedelta
 
 import aiohttp
 
+from shared.resilience import CircuitBreaker, CircuitOpenError
 from .models import Position, Trade, Activity, PortfolioValue, Market, Tag, MarketHolder
 
 logger = logging.getLogger(__name__)
+
+_pm_breaker = CircuitBreaker(name="polymarket", failure_threshold=5, recovery_timeout=60.0)
 
 
 class RateLimiter:
@@ -47,9 +50,14 @@ class PolymarketClient:
         self._session: Optional[aiohttp.ClientSession] = None
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session."""
+        """Get or create aiohttp session with connection pooling."""
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=self.timeout)
+            connector = aiohttp.TCPConnector(
+                limit=20, limit_per_host=10, ttl_dns_cache=300,
+            )
+            self._session = aiohttp.ClientSession(
+                timeout=self.timeout, connector=connector,
+            )
         return self._session
 
     async def close(self) -> None:
@@ -64,7 +72,8 @@ class PolymarketClient:
         params: Optional[dict] = None,
         _max_retries: int = 5,
     ) -> dict | list:
-        """Make a rate-limited request with bounded retry on 429."""
+        """Make a rate-limited request with bounded retry on 429 and circuit breaker."""
+        _pm_breaker._check_can_execute()
         session = await self._get_session()
 
         for attempt in range(_max_retries):
@@ -72,6 +81,7 @@ class PolymarketClient:
             try:
                 async with session.request(method, url, params=params) as response:
                     if response.status == 200:
+                        _pm_breaker._record_success()
                         return await response.json()
                     elif response.status == 429:
                         delay = min(5 * (2 ** attempt), 60)
@@ -86,15 +96,20 @@ class PolymarketClient:
                         logger.error(f"API error {response.status}: {text}")
                         return []
             except asyncio.TimeoutError:
+                _pm_breaker._record_failure()
                 logger.error(f"Timeout fetching {url} (attempt {attempt + 1})")
                 if attempt < _max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
                     continue
                 return []
+            except CircuitOpenError:
+                raise
             except Exception as e:
+                _pm_breaker._record_failure()
                 logger.error(f"Error fetching {url}: {e}")
                 return []
 
+        _pm_breaker._record_failure()
         logger.error(f"Max retries ({_max_retries}) exceeded for {url}")
         return []
 

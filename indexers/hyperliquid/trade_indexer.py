@@ -105,10 +105,12 @@ class HyperliquidTradeIndexer(BaseTradeIndexer):
             "taker": trade.users[0] if trade.users else "",
             "maker": trade.users[1] if len(trade.users) > 1 else "",
         }
-        await r.hset(trade_key, mapping=trade_data)
-        await r.expire(trade_key, self.trades_ttl)
-        await r.zadd(self.trades_key, {trade.tid: trade.time_ms / 1000})
-        await r.sadd(self.COINS_KEY, trade.coin)
+        pipe = r.pipeline(transaction=True)
+        pipe.hset(trade_key, mapping=trade_data)
+        pipe.expire(trade_key, self.trades_ttl)
+        pipe.zadd(self.trades_key, {trade.tid: trade.time_ms / 1000})
+        pipe.sadd(self.COINS_KEY, trade.coin)
+        await pipe.execute()
 
     async def get_recent_trades(
         self, limit: int = 100, coin: str | None = None,

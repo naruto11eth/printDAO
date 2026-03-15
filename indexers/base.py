@@ -194,6 +194,7 @@ class BaseTradeIndexer:
         self._stats.uptime_seconds = now - self._start_time
 
         await self._update_extra_stats()
+        await self._prune_sorted_sets()
 
         try:
             r = await self._get_redis()
@@ -204,6 +205,25 @@ class BaseTradeIndexer:
         except Exception as e:
             logger.debug(f"Failed to persist stats: {e}")
 
+    async def _prune_sorted_sets(self) -> None:
+        """Remove entries older than trades_ttl from trades and whales sorted sets.
+
+        Prevents unbounded growth — trade data hashes have TTL but sorted set
+        members remain as orphans without explicit pruning.
+        """
+        try:
+            r = await self._get_redis()
+            cutoff = time.time() - self.trades_ttl
+            removed_trades = await r.zremrangebyscore(self.trades_key, 0, cutoff)
+            removed_whales = await r.zremrangebyscore(self.whales_key, 0, cutoff)
+            if removed_trades or removed_whales:
+                logger.debug(
+                    f"Pruned sorted sets: {removed_trades} trades, "
+                    f"{removed_whales} whales older than {self.trades_ttl}s"
+                )
+        except Exception as e:
+            logger.debug(f"Failed to prune sorted sets: {e}")
+
     async def _update_extra_stats(self) -> None:
         """Override to update exchange-specific stats before persistence."""
 
@@ -213,13 +233,23 @@ class BaseTradeIndexer:
     async def get_recent_trades(
         self, limit: int = 100, filter_field: str | None = None, filter_value: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Get recent trades from Redis, optionally filtered."""
+        """Get recent trades from Redis, optionally filtered.
+
+        Uses pipeline for batch HGETALL (transaction=False for reads).
+        """
         r = await self._get_redis()
         trade_ids = await r.zrevrange(self.trades_key, 0, limit * 2 - 1)
 
-        trades = []
+        if not trade_ids:
+            return []
+
+        pipe = r.pipeline(transaction=False)
         for tid in trade_ids:
-            trade_data = await r.hgetall(f"{self.trades_data_key}:{tid}")
+            pipe.hgetall(f"{self.trades_data_key}:{tid}")
+        results = await pipe.execute()
+
+        trades = []
+        for trade_data in results:
             if not trade_data:
                 continue
             if filter_field and filter_value:
