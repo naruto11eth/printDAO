@@ -1041,24 +1041,76 @@ async def callback_show_pnl(
 async def callback_enable_copy(
     callback: CallbackQuery,
     callback_data: CopyTradingAction,
+    copy_trading_service=None,
 ) -> None:
     """Enable copy trading signals for a trader."""
-    await callback.answer(
-        f"Copy trading signals enabled for {callback_data.address[:10]}...\n"
-        "You'll receive alerts when this trader opens/closes positions.",
-        show_alert=True,
-    )
-    # TODO: Implement actual copy trading subscription
+    if not copy_trading_service:
+        await callback.answer("Copy trading not available.", show_alert=True)
+        return
+
+    address = callback_data.address
+    user_id = callback.from_user.id
+
+    try:
+        await copy_trading_service.enable_copy_trading(
+            user_id=user_id,
+            address=address,
+            mode="signals",
+        )
+        await callback.answer(
+            f"Copy trading signals enabled for {address[:10]}...\n"
+            "You'll receive alerts when this trader opens/closes positions.",
+            show_alert=True,
+        )
+    except Exception as e:
+        await callback.answer(f"Error: {str(e)[:50]}", show_alert=True)
 
 
 @router.callback_query(WatchlistAction.filter(F.action == "add"))
 async def callback_add_to_watchlist(
     callback: CallbackQuery,
     callback_data: WatchlistAction,
+    wallet_service=None,
 ) -> None:
-    """Add trader to watchlist."""
-    await callback.answer(
-        f"Added {callback_data.address[:10]}... to watchlist",
-        show_alert=True,
+    """Add trader to watchlist (track wallet)."""
+    if not wallet_service:
+        await callback.answer("Wallet service not available.", show_alert=True)
+        return
+
+    result = await wallet_service.track_wallet(
+        user_id=callback.from_user.id,
+        address=callback_data.address,
+        label="watchlist",
     )
-    # TODO: Implement watchlist storage
+    if result.success:
+        await callback.answer(f"Added {callback_data.address[:10]}... to watchlist", show_alert=True)
+    else:
+        await callback.answer(result.error or "Failed", show_alert=True)
+
+
+@router.message(Command("copy_status"))
+async def cmd_copy_status(
+    message: Message,
+    command: CommandObject,
+    copy_trading_service=None,
+) -> None:
+    """Show active copy trading configurations."""
+    if not copy_trading_service:
+        await message.reply("Copy trading service not available.")
+        return
+
+    configs = await copy_trading_service.get_user_copy_wallets(message.from_user.id)
+
+    if not configs:
+        await message.reply("No active copy trading configurations.\n\nUse the 'Enable Copy' button on /hl_analytics to start.")
+        return
+
+    lines = ["<b>Active Copy Trading</b>\n"]
+    for cfg in configs:
+        addr_short = f"{cfg.address[:6]}...{cfg.address[-4:]}"
+        lines.append(
+            f"<code>{addr_short}</code> — {cfg.mode}\n"
+            f"  Min: ${cfg.min_trade_size:,.0f}"
+        )
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
