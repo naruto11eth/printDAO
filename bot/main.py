@@ -18,7 +18,9 @@ from bot.services.position_indexer import PositionIndexer
 from bot.services.whale_detector import ConfigurableWhaleDetector
 from bot.services.analytics_service import AnalyticsService
 from bot.services.copy_trading_service import CopyTradingService
+from bot.services.leaderboard_service import LeaderboardService
 from bot.routers import general, tracking, polymarket, hyperliquid, settings
+from bot.routers import leaderboard as leaderboard_router
 from bot.middlewares import RateLimitMiddleware, ThrottleMiddleware
 from bot.schedulers import MarketMonitorScheduler
 from indexers.polymarket import PolymarketIndexer
@@ -123,6 +125,8 @@ async def main() -> None:
     dp["whale_detector"] = whale_detector
     dp["analytics_service"] = analytics_service
     dp["copy_trading_service"] = copy_trading_service
+    leaderboard_service = LeaderboardService(redis_client, analytics_service, hyperliquid_client)
+    dp["leaderboard_service"] = leaderboard_service
     dp["market_scheduler"] = market_scheduler
     dp["config"] = config
 
@@ -132,6 +136,7 @@ async def main() -> None:
     dp.include_router(polymarket.router)
     dp.include_router(hyperliquid.router)
     dp.include_router(settings.router)
+    dp.include_router(leaderboard_router.router)
 
     # Startup handler
     @dp.startup()
