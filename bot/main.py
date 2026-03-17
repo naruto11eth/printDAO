@@ -22,9 +22,12 @@ from bot.services.leaderboard_service import LeaderboardService
 from bot.services.whale_flow_service import WhaleFlowDetector
 from bot.services.label_service import LabelService
 from bot.services.alert_rules_service import AlertRulesService
+from bot.services.stream_service import TradeStreamProducer, TradeStreamConsumer
+from bot.services.report_service import ReportService
 from bot.routers import general, tracking, polymarket, hyperliquid, settings
 from bot.routers import leaderboard as leaderboard_router
 from bot.routers import intelligence as intelligence_router
+from bot.routers import reports as reports_router
 from bot.middlewares import RateLimitMiddleware, ThrottleMiddleware
 from bot.schedulers import MarketMonitorScheduler
 from indexers.polymarket import PolymarketIndexer
@@ -134,6 +137,8 @@ async def main() -> None:
     dp["whale_flow_detector"] = WhaleFlowDetector(redis_client)
     dp["label_service"] = LabelService(redis_client)
     dp["alert_rules_service"] = AlertRulesService(redis_client)
+    dp["stream_producer"] = TradeStreamProducer(redis_client)
+    dp["report_service"] = ReportService(redis_client)
     dp["market_scheduler"] = market_scheduler
     dp["config"] = config
 
@@ -145,6 +150,7 @@ async def main() -> None:
     dp.include_router(settings.router)
     dp.include_router(leaderboard_router.router)
     dp.include_router(intelligence_router.router)
+    dp.include_router(reports_router.router)
 
     # Startup handler
     @dp.startup()
