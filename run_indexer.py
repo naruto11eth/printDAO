@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Standalone trade indexer - runs perpetually and indexes ALL trades."""
+"""Standalone trade indexer - runs perpetually and indexes ALL trades.
+
+Phase A ingest pivot: HL trades default to WebSocket (set HL_USE_WS_TRADES=0
+to fall back to REST polling). WS feeds trades via
+`HyperliquidTradeIndexer.ingest_ws_trades`; the indexer's `_run_loop` stays
+alive for stats/pruning. Trade events are also fanned out to the Redis Streams
+event bus (`stream:trades:hl`) for downstream consumers added in Phase B.
+"""
 
 import asyncio
 import sys
@@ -7,13 +14,16 @@ import os
 import logging
 from datetime import datetime
 
-# Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from indexers.polymarket.trade_indexer import PolymarketTradeIndexer
 from indexers.hyperliquid.trade_indexer import HyperliquidTradeIndexer
+from indexers.hyperliquid.ws_client import HyperliquidWS
+from indexers.hyperliquid.models import Trade as HLTrade
+from bot.storage.redis_client import RedisClient
+from bot.services.stream_service import EventBusProducer
+from shared.constants import StreamName
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
@@ -22,34 +32,90 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _trade_to_stream_fields(trade: HLTrade) -> dict:
+    return {
+        "tid": trade.tid,
+        "coin": trade.coin,
+        "time_ms": trade.time_ms,
+        "price": str(trade.price),
+        "size": str(trade.size),
+        "side": trade.side.value,
+        "notional_usd": str(trade.notional_usd),
+        "direction": trade.direction.value,
+        "hash": trade.hash,
+        "taker": trade.users[0] if trade.users else "",
+        "maker": trade.users[1] if len(trade.users) > 1 else "",
+    }
+
+
 class HeadlessIndexer:
     """Headless indexer for Docker/Railway deployment."""
 
     def __init__(self, redis_url: str):
         self.redis_url = redis_url
+        self.use_ws_trades = _env_bool("HL_USE_WS_TRADES", True)
+
+        self.redis_client = RedisClient(redis_url)
+        self.producer = EventBusProducer(self.redis_client)
+
+        async def on_trade(trade: HLTrade) -> None:
+            try:
+                await self.producer.publish(
+                    StreamName.TRADES_HL, _trade_to_stream_fields(trade),
+                )
+            except Exception as e:
+                logger.debug("Stream publish failed for trade %s: %s", trade.tid, e)
+
         self.pm_indexer = PolymarketTradeIndexer(redis_url=redis_url, poll_interval=2.0)
-        self.hl_indexer = HyperliquidTradeIndexer(redis_url=redis_url, poll_interval=3.0)
+        self.hl_indexer = HyperliquidTradeIndexer(
+            redis_url=redis_url,
+            poll_interval=3.0,
+            on_trade=on_trade,
+            rest_polling_enabled=not self.use_ws_trades,
+        )
+
+        self.hl_ws: HyperliquidWS | None = None
+        if self.use_ws_trades:
+            self.hl_ws = HyperliquidWS(on_trade=self.hl_indexer.ingest_ws_trades)
+            for coin in self.hl_indexer.coins:
+                self.hl_ws.subscribe_trades(coin)
+
         self.running = True
 
     async def log_stats(self):
-        """Log stats periodically."""
         while self.running:
-            await asyncio.sleep(60)  # Log every minute
+            await asyncio.sleep(60)
             pm = self.pm_indexer._stats
             hl = self.hl_indexer._stats
+            ws_state = "connected" if self.hl_ws and self.hl_ws.is_connected else "off"
             logger.info(
-                f"PM: {pm.total_trades_indexed:,} trades, ${pm.total_volume_usd:,.0f} vol, {pm.trades_last_minute}/min | "
-                f"HL: {hl.total_trades_indexed:,} trades, ${hl.total_volume_usd:,.0f} vol, {hl.trades_last_minute}/min"
+                "PM: %d trades, $%.0f vol, %d/min | "
+                "HL: %d trades, $%.0f vol, %d/min, ws=%s",
+                pm.total_trades_indexed, pm.total_volume_usd, pm.trades_last_minute,
+                hl.total_trades_indexed, hl.total_volume_usd, hl.trades_last_minute,
+                ws_state,
             )
 
     async def run(self):
-        """Run indexers without UI."""
         logger.info("Starting PrintDAO Trade Indexer (headless mode)")
         logger.info(f"Redis: {self.redis_url}")
-        logger.info("Indexing ALL trades from Polymarket and Hyperliquid")
+        logger.info(
+            "HL ingest: %s | PM ingest: REST",
+            "WebSocket" if self.use_ws_trades else "REST",
+        )
 
+        await self.redis_client.connect()
         await self.pm_indexer.start()
         await self.hl_indexer.start()
+        if self.hl_ws is not None:
+            await self.hl_ws.start()
 
         stats_task = asyncio.create_task(self.log_stats())
 
@@ -61,25 +127,28 @@ class HeadlessIndexer:
         finally:
             self.running = False
             stats_task.cancel()
+            if self.hl_ws is not None:
+                await self.hl_ws.stop()
             await self.pm_indexer.stop()
             await self.hl_indexer.stop()
+            await self.redis_client.disconnect()
 
             pm = self.pm_indexer._stats
             hl = self.hl_indexer._stats
-            logger.info(f"Final - PM: {pm.total_trades_indexed:,} trades | HL: {hl.total_trades_indexed:,} trades")
+            logger.info(
+                "Final - PM: %d trades | HL: %d trades",
+                pm.total_trades_indexed, hl.total_trades_indexed,
+            )
 
 
 def is_terminal():
-    """Check if running in a terminal."""
     return sys.stdout.isatty() and os.environ.get("HEADLESS") != "1"
 
 
 async def main():
-    # Get Redis URL from env or args
     redis_url = os.environ.get("REDIS_URL") or (sys.argv[1] if len(sys.argv) > 1 else "redis://localhost:6379/0")
 
     if is_terminal():
-        # Import Rich only when needed (terminal mode)
         from rich.console import Console
         from rich.live import Live
         from rich.table import Table
@@ -90,7 +159,7 @@ async def main():
         console = Console()
 
         class IndexerDashboard:
-            """Live dashboard for terminal."""
+            """Live dashboard for terminal — dev-only, still uses REST polling."""
 
             def __init__(self):
                 self.pm_indexer = PolymarketTradeIndexer(redis_url=redis_url, poll_interval=2.0)
@@ -163,7 +232,6 @@ async def main():
         dashboard = IndexerDashboard()
         await dashboard.run()
     else:
-        # Headless mode for Docker/Railway
         indexer = HeadlessIndexer(redis_url)
         await indexer.run()
 
