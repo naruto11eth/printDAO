@@ -12,7 +12,9 @@ from datetime import datetime, timedelta, timezone
 from hyperliquid.info import Info
 from hyperliquid.utils import constants
 
+from shared.constants import HL_ENDPOINT_WEIGHTS
 from shared.resilience import CircuitBreaker, CircuitOpenError
+from shared.weight_budget import HL_BUDGET
 from .models import Trade, Position, Fill, AssetContext, UserState, SentimentSummary, TradeSide, Direction
 
 logger = logging.getLogger(__name__)
@@ -121,8 +123,16 @@ class HyperliquidClient:
                 time.sleep(delay)
                 delay = min(delay * 2, 10)
 
-    async def _run_in_pool(self, func: Callable, *args, **kwargs):
-        """Run a synchronous SDK call in the dedicated HL thread pool with circuit breaker."""
+    async def _run_in_pool(self, endpoint: str, func: Callable, *args, **kwargs):
+        """Run a synchronous SDK call in the dedicated HL thread pool with circuit breaker.
+
+        Reserves weight from the HL budget (1200/min cap) before executing.
+        Pass endpoint = the HL `/info` type (e.g. "clearinghouseState", "recentTrades")
+        to pick the documented weight; falls back to 1 for unlisted endpoints.
+        """
+        weight = HL_ENDPOINT_WEIGHTS.get(endpoint, 1)
+        await HL_BUDGET.reserve(endpoint, weight)
+
         async def _execute():
             loop = asyncio.get_running_loop()
             return await loop.run_in_executor(
@@ -140,7 +150,7 @@ class HyperliquidClient:
             meta = info.meta()
             return [asset["name"] for asset in meta.get("universe", [])]
 
-        self._coins = await self._run_in_pool(_fetch)
+        self._coins = await self._run_in_pool("meta", _fetch)
         return self._coins
 
     async def get_recent_trades(self, coin: str, limit: int = 100) -> List[Trade]:
@@ -158,7 +168,7 @@ class HyperliquidClient:
             raw = info.post("/info", {"type": "recentTrades", "coin": coin})
             return [Trade.from_raw(coin, item) for item in raw[:limit]]
 
-        trades = await self._run_in_pool(_fetch)
+        trades = await self._run_in_pool("recentTrades", _fetch)
 
         # Add to cache
         for t in trades:
@@ -180,7 +190,7 @@ class HyperliquidClient:
             raw = info.user_state(address)
             return UserState.from_raw(address, raw)
 
-        return await self._run_in_pool(_fetch)
+        return await self._run_in_pool("clearinghouseState", _fetch)
 
     async def get_user_positions(self, address: str) -> List[Position]:
         """Get user's open positions.
@@ -211,7 +221,7 @@ class HyperliquidClient:
             fills.sort(key=lambda f: f.time_ms, reverse=True)
             return fills[:limit]
 
-        return await self._run_in_pool(_fetch)
+        return await self._run_in_pool("userFills", _fetch)
 
     async def get_asset_contexts(self) -> dict[str, AssetContext]:
         """Get market context for all assets.
@@ -233,7 +243,7 @@ class HyperliquidClient:
 
             return result
 
-        return await self._run_in_pool(_fetch)
+        return await self._run_in_pool("metaAndAssetCtxs", _fetch)
 
     async def get_portfolio(self, address: str) -> dict:
         """Get portfolio performance (ROE, PnL) directly from API.
@@ -244,7 +254,7 @@ class HyperliquidClient:
             info = self._get_info()
             return info.post("/info", {"type": "portfolio", "user": address})
 
-        return await self._run_in_pool(_fetch)
+        return await self._run_in_pool("portfolio", _fetch)
 
     async def get_user_fills_by_time(
         self,
@@ -271,7 +281,7 @@ class HyperliquidClient:
             fills.sort(key=lambda f: f.time_ms, reverse=True)
             return fills
 
-        return await self._run_in_pool(_fetch)
+        return await self._run_in_pool("userFillsByTime", _fetch)
 
     async def get_whale_trades(
         self,
