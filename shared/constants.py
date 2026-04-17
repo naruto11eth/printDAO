@@ -82,6 +82,28 @@ REDIS_KEYS = {
     "hl_whales": "hl:whales",
     "hl_coins": "hl:coins",
     "hl_stats": "hl:indexer:stats",
+    # Top traders (leaderboard crawler — Phase B1)
+    "hl_top_traders": "hl:top_traders",
+    "hl_top_trader": "hl:top_trader:{address}",
+    "hl_top_traders_updated": "hl:top_traders:updated_at",
+    # Liquidations (Phase B3)
+    "hl_liquidations": "hl:liquidations",
+    "hl_liquidation": "hl:liq:{id}",
+    "hl_liq_by_addr": "hl:liq:addr:{address}",
+    # Funding + OI time-series (Phase B4)
+    "hl_funding": "hl:funding:{coin}",
+    "hl_oi": "hl:oi:{coin}",
+    # Persistent fill history (Phase B5)
+    "hl_fills": "hl:fills:{address}",
+    "hl_fill": "hl:fill:{address}:{oid}",
+    "hl_fills_backfill": "hl:fills:backfill:{address}",
+    # Vaults (Phase C1)
+    "hl_vaults": "hl:vaults",
+    "hl_vault_summary": "hl:vault:{address}:summary",
+    "hl_vault_snapshots": "hl:vault:{address}:snapshots",
+    # Clusters / TWAP (Phase C2)
+    "hl_clusters": "hl:clusters:{address}",
+    "hl_cluster": "hl:cluster:{id}",
     # Trade indexer (PM)
     "pm_trades": "pm:trades",
     "pm_trade": "pm:trade:{tx_hash}",
@@ -102,6 +124,35 @@ REDIS_KEYS = {
     # Scheduler
     "monitor_job": "monitor:{user_id}:{exchange}",
 }
+
+# Event bus stream names (Phase A1)
+class StreamName:
+    TRADES_HL = "stream:trades:hl"
+    TRADES_PM = "stream:trades:pm"
+    USER_EVENTS_HL = "stream:user_events:hl"
+    LIQUIDATIONS_HL = "stream:liquidations:hl"
+    FUNDING_HL = "stream:funding:hl"
+    VAULT_FLOW_HL = "stream:vault_flow:hl"
+    CLUSTERS_HL = "stream:clusters:hl"
+    TOP_TRADERS_UPDATED = "stream:top_traders_updated:hl"
+
+
+# HL API rate-limit weights per endpoint (for WeightBudgetScheduler, Phase A2).
+# Source: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits-and-user-limits
+# Mainnet cap: 1200 weight / minute per IP.
+HL_WEIGHT_BUDGET_PER_MINUTE = 1200
+HL_ENDPOINT_WEIGHTS: dict[str, int] = {
+    "clearinghouseState": 2,
+    "metaAndAssetCtxs": 2,
+    "recentTrades": 20,
+    "userFills": 20,
+    "userFillsByTime": 20,
+    "portfolio": 2,
+    "vaultSummaries": 2,
+    "vaultDetails": 2,
+    "userVaultEquities": 2,
+}
+
 
 # Alert types
 class AlertType:
