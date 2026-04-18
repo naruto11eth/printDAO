@@ -22,7 +22,13 @@ from bot.services.leaderboard_service import LeaderboardService
 from bot.services.whale_flow_service import WhaleFlowDetector
 from bot.services.label_service import LabelService
 from bot.services.alert_rules_service import AlertRulesService
-from bot.services.stream_service import TradeStreamProducer, TradeStreamConsumer
+from bot.services.stream_service import (
+    TradeStreamProducer,
+    TradeStreamConsumer,
+    EventBusProducer,
+    EventBusConsumer,
+)
+from bot.services.liquidation_indexer import LiquidationIndexer
 from bot.services.report_service import ReportService
 from bot.routers import general, tracking, polymarket, hyperliquid, settings
 from bot.routers import leaderboard as leaderboard_router
@@ -137,7 +143,19 @@ async def main() -> None:
     dp["whale_flow_detector"] = WhaleFlowDetector(redis_client)
     dp["label_service"] = LabelService(redis_client)
     dp["alert_rules_service"] = AlertRulesService(redis_client)
-    dp["stream_producer"] = TradeStreamProducer(redis_client)
+    event_producer = EventBusProducer(redis_client)
+    dp["stream_producer"] = event_producer
+    dp["event_producer"] = event_producer
+
+    liquidation_indexer = LiquidationIndexer(redis_client, event_producer)
+    dp["liquidation_indexer"] = liquidation_indexer
+
+    event_bus_consumer = EventBusConsumer(
+        redis_client,
+        handlers={"stream:user_events:hl": liquidation_indexer.handle},
+    )
+    dp["event_bus_consumer"] = event_bus_consumer
+
     dp["report_service"] = ReportService(redis_client)
     dp["market_scheduler"] = market_scheduler
     dp["config"] = config
@@ -167,6 +185,9 @@ async def main() -> None:
         # Start Position indexer
         await position_indexer.start()
 
+        # Start event-bus consumer (processes stream:user_events:hl → liquidations)
+        await event_bus_consumer.start()
+
         # Start market monitor scheduler
         await market_scheduler.start()
         await market_scheduler.restore_user_jobs()
@@ -177,6 +198,8 @@ async def main() -> None:
         logger.info("Shutting down...")
         # Stop scheduler
         await market_scheduler.stop()
+        # Stop event bus consumer
+        await event_bus_consumer.stop()
         # Stop indexers
         await polymarket_indexer.stop()
         await position_indexer.stop()
