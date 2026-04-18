@@ -678,6 +678,80 @@ async def cmd_hl_coins(
         await message.reply(f"Error fetching coins: {str(e)}")
 
 
+def _format_usd_short(value: float) -> str:
+    """Compact $ format for leaderboard display."""
+    abs_v = abs(value)
+    sign = "-" if value < 0 else ""
+    if abs_v >= 1e9:
+        return f"{sign}${abs_v / 1e9:.2f}B"
+    if abs_v >= 1e6:
+        return f"{sign}${abs_v / 1e6:.2f}M"
+    if abs_v >= 1e3:
+        return f"{sign}${abs_v / 1e3:.2f}K"
+    return f"{sign}${abs_v:.0f}"
+
+
+@router.message(Command("top"))
+async def cmd_top(
+    message: Message,
+    command: CommandObject,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Show top HL traders straight from HL's own leaderboard.
+
+    Usage: /top [N]         — top N (default 10, max 50)
+    Source: stats-data.hyperliquid.xyz/Mainnet/leaderboard, refreshed every 5 min.
+    """
+    if not redis_client:
+        await message.reply("Storage unavailable.")
+        return
+
+    n = 10
+    if command.args:
+        try:
+            n = max(1, min(50, int(command.args.strip())))
+        except ValueError:
+            pass
+
+    addresses = await redis_client.zrange("hl:top_traders", 0, n - 1, desc=True)
+    if not addresses:
+        await message.reply(
+            "Top-trader crawler has no data yet. "
+            "The indexer populates this every 5 minutes — try again shortly.",
+        )
+        return
+
+    pipe = redis_client.redis.pipeline(transaction=False)
+    for addr in addresses:
+        pipe.hgetall(f"hl:top_trader:{addr}")
+    results = await pipe.execute()
+
+    updated_at = await redis_client.get("hl:top_traders:updated_at")
+    try:
+        age_s = int(__import__("time").time() - int(updated_at)) if updated_at else None
+    except (TypeError, ValueError):
+        age_s = None
+
+    lines = [f"<b>🏆 HL Top {n} (by all-time PnL)</b>"]
+    if age_s is not None:
+        lines.append(f"<i>Updated {age_s}s ago</i>")
+    lines.append("")
+    for idx, (addr, fields) in enumerate(zip(addresses, results), start=1):
+        if not fields:
+            continue
+        name = fields.get("display_name") or shorten_address(addr)
+        pnl = float(fields.get("allTime_pnl", 0) or 0)
+        roi = float(fields.get("allTime_roi", 0) or 0)
+        av = float(fields.get("account_value", 0) or 0)
+        lines.append(
+            f"<b>{idx}.</b> <code>{escape_html(name)}</code> "
+            f"— {_format_usd_short(pnl)} "
+            f"({roi * 100:+.1f}%) | AV {_format_usd_short(av)}",
+        )
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
 @router.message(Command("hl_indexed"))
 async def cmd_hl_indexed(
     message: Message,
