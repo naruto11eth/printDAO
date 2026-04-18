@@ -21,6 +21,11 @@ from indexers.hyperliquid.trade_indexer import HyperliquidTradeIndexer
 from indexers.hyperliquid.ws_client import HyperliquidWS
 from indexers.hyperliquid.models import Trade as HLTrade
 from indexers.hyperliquid.leaderboard_crawler import LeaderboardCrawler
+from indexers.hyperliquid.user_events import UserEventDispatcher
+from indexers.hyperliquid.user_subscriptions import (
+    UserSubscriptionManager,
+    DEFAULT_CAP as USER_SUB_DEFAULT_CAP,
+)
 from bot.storage.redis_client import RedisClient
 from bot.services.stream_service import EventBusProducer
 from shared.constants import StreamName
@@ -83,9 +88,15 @@ class HeadlessIndexer:
             rest_polling_enabled=not self.use_ws_trades,
         )
 
+        self.user_dispatcher = UserEventDispatcher(self.producer)
+
         self.hl_ws: HyperliquidWS | None = None
         if self.use_ws_trades:
-            self.hl_ws = HyperliquidWS(on_trade=self.hl_indexer.ingest_ws_trades)
+            self.hl_ws = HyperliquidWS(
+                on_trade=self.hl_indexer.ingest_ws_trades,
+                on_user_event=self.user_dispatcher.handle_user_event,
+                on_user_fills=self.user_dispatcher.handle_user_fills,
+            )
             for coin in self.hl_indexer.coins:
                 self.hl_ws.subscribe_trades(coin)
 
@@ -99,6 +110,15 @@ class HeadlessIndexer:
                 rank_by=os.environ.get("HL_LEADERBOARD_RANK", "allTime"),
             )
 
+        self.user_sub_manager: UserSubscriptionManager | None = None
+        if self.hl_ws is not None and _env_bool("HL_USER_SUBS_ENABLED", True):
+            self.user_sub_manager = UserSubscriptionManager(
+                redis_client=self.redis_client,
+                ws=self.hl_ws,
+                cap=int(os.environ.get("HL_USER_SUBS_CAP", str(USER_SUB_DEFAULT_CAP))),
+                refresh_interval=float(os.environ.get("HL_USER_SUBS_INTERVAL", "60")),
+            )
+
         self.running = True
 
     async def log_stats(self):
@@ -108,12 +128,15 @@ class HeadlessIndexer:
             hl = self.hl_indexer._stats
             ws_state = "connected" if self.hl_ws and self.hl_ws.is_connected else "off"
             lb_count = self.leaderboard.last_row_count if self.leaderboard else 0
+            user_subs = (
+                self.user_sub_manager.last_count if self.user_sub_manager else 0
+            )
             logger.info(
                 "PM: %d trades, $%.0f vol, %d/min | "
-                "HL: %d trades, $%.0f vol, %d/min, ws=%s, top=%d",
+                "HL: %d trades, $%.0f vol, %d/min, ws=%s, top=%d, usubs=%d",
                 pm.total_trades_indexed, pm.total_volume_usd, pm.trades_last_minute,
                 hl.total_trades_indexed, hl.total_volume_usd, hl.trades_last_minute,
-                ws_state, lb_count,
+                ws_state, lb_count, user_subs,
             )
 
     async def run(self):
@@ -131,6 +154,8 @@ class HeadlessIndexer:
             await self.hl_ws.start()
         if self.leaderboard is not None:
             await self.leaderboard.start()
+        if self.user_sub_manager is not None:
+            await self.user_sub_manager.start()
 
         stats_task = asyncio.create_task(self.log_stats())
 
@@ -142,6 +167,8 @@ class HeadlessIndexer:
         finally:
             self.running = False
             stats_task.cancel()
+            if self.user_sub_manager is not None:
+                await self.user_sub_manager.stop()
             if self.leaderboard is not None:
                 await self.leaderboard.stop()
             if self.hl_ws is not None:
