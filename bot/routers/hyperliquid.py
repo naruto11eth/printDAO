@@ -752,6 +752,68 @@ async def cmd_top(
     await message.reply("\n".join(lines), parse_mode="HTML")
 
 
+@router.message(Command("liquidations"))
+async def cmd_liquidations(
+    message: Message,
+    command: CommandObject,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Recent HL liquidations.
+
+    Usage:
+      /liquidations            — last 10
+      /liquidations 25         — last 25 (max 50)
+      /liquidations 0xABC...   — per-wallet history (last 10)
+    """
+    if not redis_client:
+        await message.reply("Storage unavailable.")
+        return
+
+    args = (command.args or "").strip().split()
+    n = 10
+    address: Optional[str] = None
+
+    for a in args:
+        if a.startswith("0x") and len(a) == 42:
+            address = a.lower()
+        else:
+            try:
+                n = max(1, min(50, int(a)))
+            except ValueError:
+                pass
+
+    key = f"hl:liq:addr:{address}" if address else "hl:liquidations"
+    ids = await redis_client.zrange(key, 0, n - 1, desc=True)
+    if not ids:
+        scope = f"for <code>{escape_html(shorten_address(address))}</code>" if address else ""
+        await message.reply(f"No liquidations found {scope}.", parse_mode="HTML")
+        return
+
+    pipe = redis_client.redis.pipeline(transaction=False)
+    for liq_id in ids:
+        pipe.hgetall(f"hl:liq:{liq_id}")
+    rows = await pipe.execute()
+
+    header = "<b>💥 Recent Liquidations</b>"
+    if address:
+        header = f"<b>💥 Liquidations for</b> <code>{escape_html(shorten_address(address))}</code>"
+
+    lines = [header, ""]
+    for data in rows:
+        if not data:
+            continue
+        addr = data.get("address", "")
+        ntl = float(data.get("ntl_pos", 0) or 0)
+        av = float(data.get("account_value", 0) or 0)
+        lines.append(
+            f"• <code>{escape_html(shorten_address(addr))}</code> "
+            f"— {_format_usd_short(ntl)} pos"
+            f" (acct {_format_usd_short(av)})",
+        )
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
 @router.message(Command("hl_indexed"))
 async def cmd_hl_indexed(
     message: Message,
