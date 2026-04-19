@@ -752,6 +752,116 @@ async def cmd_top(
     await message.reply("\n".join(lines), parse_mode="HTML")
 
 
+def _parse_timeseries_member(member: str) -> tuple[int, float] | None:
+    """Members are stored as `{ts_ms}:{value}` by MarketStatsIndexer."""
+    try:
+        ts_str, val_str = member.split(":", 1)
+        return int(ts_str), float(val_str)
+    except (ValueError, AttributeError):
+        return None
+
+
+async def _latest_timeseries(redis: RedisClient, key: str, n: int) -> list[tuple[int, float]]:
+    raw = await redis.redis.zrevrange(key, 0, n - 1)
+    points: list[tuple[int, float]] = []
+    for m in raw or []:
+        parsed = _parse_timeseries_member(m)
+        if parsed is not None:
+            points.append(parsed)
+    return points
+
+
+@router.message(Command("funding"))
+async def cmd_funding(
+    message: Message,
+    command: CommandObject,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Recent funding-rate samples for a coin.
+
+    Usage: /funding BTC
+    """
+    if not redis_client:
+        await message.reply("Storage unavailable.")
+        return
+    if not command.args:
+        await message.reply(
+            "<b>Usage:</b> /funding &lt;coin&gt;\n\nExample: <code>/funding BTC</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    coin = command.args.strip().split()[0].upper()
+    points = await _latest_timeseries(redis_client, f"hl:funding:{coin}", 10)
+    if not points:
+        await message.reply(
+            f"No funding history indexed for <b>{escape_html(coin)}</b> yet. "
+            f"The market-stats indexer snapshots every 60s.",
+            parse_mode="HTML",
+        )
+        return
+
+    current_ts, current = points[0]
+    vals = [v for _, v in points]
+    lines = [
+        f"<b>📊 {escape_html(coin)} Funding Rate</b>",
+        f"Current: <code>{current * 100:+.4f}%</code>/hr",
+        f"Range in last {len(points)} samples: "
+        f"<code>{min(vals) * 100:+.4f}%</code> → <code>{max(vals) * 100:+.4f}%</code>",
+        "",
+    ]
+    for ts_ms, v in points:
+        age_s = max(0, int(__import__("time").time() - ts_ms / 1000))
+        lines.append(f"  −{age_s:>4}s   <code>{v * 100:+.4f}%</code>")
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("oi"))
+async def cmd_oi(
+    message: Message,
+    command: CommandObject,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Recent open-interest samples for a coin.
+
+    Usage: /oi BTC
+    """
+    if not redis_client:
+        await message.reply("Storage unavailable.")
+        return
+    if not command.args:
+        await message.reply(
+            "<b>Usage:</b> /oi &lt;coin&gt;\n\nExample: <code>/oi BTC</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    coin = command.args.strip().split()[0].upper()
+    points = await _latest_timeseries(redis_client, f"hl:oi:{coin}", 10)
+    if not points:
+        await message.reply(
+            f"No OI history indexed for <b>{escape_html(coin)}</b> yet.",
+            parse_mode="HTML",
+        )
+        return
+
+    current = points[0][1]
+    vals = [v for _, v in points]
+    lines = [
+        f"<b>📈 {escape_html(coin)} Open Interest</b>",
+        f"Current: {_format_usd_short(current)}",
+        f"Range in last {len(points)} samples: "
+        f"{_format_usd_short(min(vals))} → {_format_usd_short(max(vals))}",
+        "",
+    ]
+    for ts_ms, v in points:
+        age_s = max(0, int(__import__("time").time() - ts_ms / 1000))
+        lines.append(f"  −{age_s:>4}s   {_format_usd_short(v)}")
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
 @router.message(Command("liquidations"))
 async def cmd_liquidations(
     message: Message,
