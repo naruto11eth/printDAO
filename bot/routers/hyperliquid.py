@@ -862,6 +862,152 @@ async def cmd_oi(
     await message.reply("\n".join(lines), parse_mode="HTML")
 
 
+_HLP_ADDRESS = "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303"
+
+
+def _parse_snapshot_member(member: str) -> tuple[int, float, int] | None:
+    """Vault snapshot members are `{ts_ms}:{tvl}:{follower_count}`."""
+    try:
+        ts, tvl, fc = member.split(":", 2)
+        return int(ts), float(tvl), int(fc)
+    except (ValueError, AttributeError):
+        return None
+
+
+async def _render_vault_card(
+    redis_client: RedisClient, address: str, n_snapshots: int = 5,
+) -> str:
+    summary = await redis_client.redis.hgetall(f"hl:vault:{address}:summary")
+    if not summary:
+        return f"No summary indexed for <code>{escape_html(shorten_address(address))}</code>."
+
+    name = summary.get("name") or shorten_address(address)
+    tvl = float(summary.get("tvl") or 0)
+    apr = float(summary.get("apr") or 0)
+    leader = summary.get("leader") or ""
+    is_closed = summary.get("is_closed") == "1"
+
+    lines = [
+        f"<b>🏦 {escape_html(name)}</b>",
+        f"TVL: {_format_usd_short(tvl)}",
+        f"APR: {apr * 100:+.2f}%",
+    ]
+    if leader:
+        lines.append(f"Leader: <code>{escape_html(shorten_address(leader))}</code>")
+    lines.append(f"Address: <code>{escape_html(address)}</code>")
+    if is_closed:
+        lines.append("<i>⚠️ closed to new deposits</i>")
+
+    snaps_raw = await redis_client.redis.zrevrange(
+        f"hl:vault:{address}:snapshots", 0, n_snapshots - 1,
+    )
+    snaps = [p for p in (_parse_snapshot_member(m) for m in (snaps_raw or [])) if p]
+    if len(snaps) >= 2:
+        recent = snaps[0][1]
+        older = snaps[-1][1]
+        delta = recent - older
+        lines.append("")
+        lines.append(
+            f"Recent {len(snaps)} snapshots delta: "
+            f"<code>{delta:+,.0f}</code> "
+            f"({(delta / older) * 100:+.2f}%)"
+            if older > 0 else f"Recent delta: <code>{delta:+,.0f}</code>",
+        )
+
+    return "\n".join(lines)
+
+
+@router.message(Command("vaults"))
+async def cmd_vaults(
+    message: Message,
+    command: CommandObject,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Top HL vaults by TVL.
+
+    Usage: /vaults [N]   (default 10, max 30)
+    """
+    if not redis_client:
+        await message.reply("Storage unavailable.")
+        return
+
+    n = 10
+    if command.args:
+        try:
+            n = max(1, min(30, int(command.args.strip().split()[0])))
+        except ValueError:
+            pass
+
+    addresses = await redis_client.zrange("hl:vaults", 0, n - 1, desc=True)
+    if not addresses:
+        await message.reply(
+            "Vault indexer has no data yet — runs every 5 minutes on startup.",
+        )
+        return
+
+    pipe = redis_client.redis.pipeline(transaction=False)
+    for addr in addresses:
+        pipe.hgetall(f"hl:vault:{addr}:summary")
+    rows = await pipe.execute()
+
+    lines = [f"<b>🏦 HL Vaults Top {len(addresses)} by TVL</b>", ""]
+    for i, (addr, data) in enumerate(zip(addresses, rows), start=1):
+        if not data:
+            continue
+        name = data.get("name") or shorten_address(addr)
+        tvl = float(data.get("tvl") or 0)
+        apr = float(data.get("apr") or 0)
+        lines.append(
+            f"<b>{i}.</b> <code>{escape_html(name[:30])}</code> "
+            f"— {_format_usd_short(tvl)} ({apr * 100:+.1f}% APR)",
+        )
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("hlp"))
+async def cmd_hlp(
+    message: Message,
+    command: CommandObject,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Hyperliquidity Provider (HLP) overview."""
+    if not redis_client:
+        await message.reply("Storage unavailable.")
+        return
+    text = await _render_vault_card(redis_client, _HLP_ADDRESS, n_snapshots=10)
+    await message.reply(text, parse_mode="HTML")
+
+
+@router.message(Command("vault"))
+async def cmd_vault(
+    message: Message,
+    command: CommandObject,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Details for a specific vault.
+
+    Usage: /vault 0xABC...
+    """
+    if not redis_client:
+        await message.reply("Storage unavailable.")
+        return
+    if not command.args:
+        await message.reply(
+            "<b>Usage:</b> /vault &lt;address&gt;\n\n"
+            "Try <code>/vaults</code> to discover addresses.",
+            parse_mode="HTML",
+        )
+        return
+
+    arg = command.args.strip().split()[0]
+    if not (arg.startswith("0x") and len(arg) == 42):
+        await message.reply("Invalid vault address.")
+        return
+    text = await _render_vault_card(redis_client, arg.lower(), n_snapshots=5)
+    await message.reply(text, parse_mode="HTML")
+
+
 @router.message(Command("liquidations"))
 async def cmd_liquidations(
     message: Message,
