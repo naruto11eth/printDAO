@@ -29,6 +29,27 @@ TRADE_STREAM_KEY = "stream:trades:{exchange}"
 Handler = Callable[[str, dict[str, str]], Awaitable[None]]
 
 
+def compose_handlers(*handlers: Handler) -> Handler:
+    """Run multiple handlers sequentially for one stream message.
+
+    Each handler's exceptions are logged and swallowed so the message
+    is xack'd once all have been attempted. Consumer-group replay would
+    re-run every handler otherwise, which is wasteful (and incorrect
+    for any handler that's already-persisted its output on an earlier
+    attempt).
+    """
+    async def composed(stream_name: str, fields: dict[str, str]) -> None:
+        for h in handlers:
+            try:
+                await h(stream_name, fields)
+            except Exception as e:
+                logger.error(
+                    "composed handler %s failed on %s: %s",
+                    getattr(h, "__qualname__", "<handler>"), stream_name, e,
+                )
+    return composed
+
+
 class EventBusProducer:
     """Writes events to arbitrary Redis Streams.
 
