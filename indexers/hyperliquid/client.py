@@ -256,6 +256,22 @@ class HyperliquidClient:
 
         return await self._run_in_pool("portfolio", _fetch)
 
+    async def get_vault_details(self, vault_address: str) -> dict:
+        """vaultDetails via raw POST — SDK does not wrap this type.
+
+        Weight 2. Returns the full vault snapshot: apr, leaderFraction,
+        followers[], and a `portfolio` with accountValueHistory[] per
+        window — the most recent accountValue is the live TVL.
+        """
+        def _fetch():
+            info = self._get_info()
+            return info.post("/info", {
+                "type": "vaultDetails",
+                "vaultAddress": vault_address,
+            })
+        raw = await self._run_in_pool("vaultDetails", _fetch)
+        return raw if isinstance(raw, dict) else {}
+
     async def get_user_fills_by_time_raw(
         self,
         address: str,
