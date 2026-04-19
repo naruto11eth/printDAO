@@ -22,6 +22,7 @@ from indexers.hyperliquid.ws_client import HyperliquidWS
 from indexers.hyperliquid.models import Trade as HLTrade
 from indexers.hyperliquid.leaderboard_crawler import LeaderboardCrawler
 from indexers.hyperliquid.market_stats_indexer import MarketStatsIndexer
+from indexers.hyperliquid.vault_indexer import VaultIndexer
 from indexers.hyperliquid.client import HyperliquidClient
 from indexers.hyperliquid.user_events import UserEventDispatcher
 from indexers.hyperliquid.user_subscriptions import (
@@ -132,6 +133,17 @@ class HeadlessIndexer:
                 poll_interval=float(os.environ.get("HL_MARKET_STATS_INTERVAL", "60")),
             )
 
+        self.vault_indexer: VaultIndexer | None = None
+        if _env_bool("HL_VAULT_INDEXER_ENABLED", True):
+            self.vault_indexer = VaultIndexer(
+                client=self.hl_indexer.client,
+                redis_client=self.redis_client,
+                producer=self.producer,
+                summaries_interval=float(os.environ.get("HL_VAULT_SUMMARIES_INTERVAL", "300")),
+                details_interval=float(os.environ.get("HL_VAULT_DETAILS_INTERVAL", "120")),
+                top_n=int(os.environ.get("HL_VAULT_TOP_N", "50")),
+            )
+
         self.running = True
 
     async def log_stats(self):
@@ -171,6 +183,8 @@ class HeadlessIndexer:
             await self.user_sub_manager.start()
         if self.market_stats is not None:
             await self.market_stats.start()
+        if self.vault_indexer is not None:
+            await self.vault_indexer.start()
 
         stats_task = asyncio.create_task(self.log_stats())
 
@@ -182,6 +196,8 @@ class HeadlessIndexer:
         finally:
             self.running = False
             stats_task.cancel()
+            if self.vault_indexer is not None:
+                await self.vault_indexer.stop()
             if self.market_stats is not None:
                 await self.market_stats.stop()
             if self.user_sub_manager is not None:
