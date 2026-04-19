@@ -21,6 +21,8 @@ from indexers.hyperliquid.trade_indexer import HyperliquidTradeIndexer
 from indexers.hyperliquid.ws_client import HyperliquidWS
 from indexers.hyperliquid.models import Trade as HLTrade
 from indexers.hyperliquid.leaderboard_crawler import LeaderboardCrawler
+from indexers.hyperliquid.market_stats_indexer import MarketStatsIndexer
+from indexers.hyperliquid.client import HyperliquidClient
 from indexers.hyperliquid.user_events import UserEventDispatcher
 from indexers.hyperliquid.user_subscriptions import (
     UserSubscriptionManager,
@@ -119,6 +121,17 @@ class HeadlessIndexer:
                 refresh_interval=float(os.environ.get("HL_USER_SUBS_INTERVAL", "60")),
             )
 
+        self.market_stats: MarketStatsIndexer | None = None
+        if _env_bool("HL_MARKET_STATS_ENABLED", True):
+            # Reuse the trade indexer's client — same budget, same circuit breaker.
+            stats_client = self.hl_indexer.client
+            self.market_stats = MarketStatsIndexer(
+                client=stats_client,
+                redis_client=self.redis_client,
+                producer=self.producer,
+                poll_interval=float(os.environ.get("HL_MARKET_STATS_INTERVAL", "60")),
+            )
+
         self.running = True
 
     async def log_stats(self):
@@ -156,6 +169,8 @@ class HeadlessIndexer:
             await self.leaderboard.start()
         if self.user_sub_manager is not None:
             await self.user_sub_manager.start()
+        if self.market_stats is not None:
+            await self.market_stats.start()
 
         stats_task = asyncio.create_task(self.log_stats())
 
@@ -167,6 +182,8 @@ class HeadlessIndexer:
         finally:
             self.running = False
             stats_task.cancel()
+            if self.market_stats is not None:
+                await self.market_stats.stop()
             if self.user_sub_manager is not None:
                 await self.user_sub_manager.stop()
             if self.leaderboard is not None:
