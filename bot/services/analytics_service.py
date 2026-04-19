@@ -250,7 +250,13 @@ def compute_composite_score(
 
 
 class AnalyticsService:
-    """Service for calculating trader analytics."""
+    """Service for calculating trader analytics.
+
+    When a FillHistoryService is attached, fill reads hit Redis first and
+    only fall back to HL's userFills endpoint when the wallet has no
+    sentinel yet (cold path). On the cold path we schedule a backfill so
+    the next call is fast.
+    """
 
     CACHE_KEY_PREFIX = "analytics"
 
@@ -259,10 +265,31 @@ class AnalyticsService:
         hl_client: HyperliquidClient,
         redis: RedisClient | None = None,
         cache_ttl: int = 300,
+        fill_history: Any = None,
     ):
         self.hl_client = hl_client
         self.redis = redis
         self.cache_ttl = cache_ttl
+        self.fill_history = fill_history
+
+    async def _get_fills(self, address: str, limit: int) -> list[Fill]:
+        """Read fills — Redis first when history service is attached."""
+        if self.fill_history is not None:
+            try:
+                fills = await self.fill_history.get_fills(address, limit=limit)
+                if fills:
+                    return fills
+                # Cold path: queue a backfill, then fall through to API.
+                try:
+                    import asyncio
+                    asyncio.create_task(
+                        self.fill_history.ensure_backfilled(address),
+                    )
+                except Exception as e:
+                    logger.debug("Could not schedule backfill: %s", e)
+            except Exception as e:
+                logger.warning("Redis fill read failed, falling back: %s", e)
+        return await self.hl_client.get_user_fills(address, limit=limit)
 
     async def get_trader_analytics(
         self,
@@ -293,7 +320,7 @@ class AnalyticsService:
     async def _calculate_analytics(self, address: str, exchange: str) -> TraderAnalytics:
         """Calculate all analytics in a single pass over fills."""
         try:
-            fills = await self.hl_client.get_user_fills(address, limit=2000)
+            fills = await self._get_fills(address, limit=2000)
             state = await self.hl_client.get_user_state(address)
         except Exception as e:
             logger.error(f"Failed to fetch data for {address}: {e}")
