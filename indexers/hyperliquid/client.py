@@ -256,6 +256,31 @@ class HyperliquidClient:
 
         return await self._run_in_pool("portfolio", _fetch)
 
+    async def get_user_fills_by_time_raw(
+        self,
+        address: str,
+        start_time_ms: int,
+        end_time_ms: int | None = None,
+    ) -> list[dict]:
+        """Raw dicts, not Fill objects. Used by the fill-history backfiller.
+
+        Preserves every field HL returns (tid, oid, feeToken, liquidation, …)
+        so downstream persistence doesn't lose info the Fill dataclass drops.
+        """
+        def _fetch():
+            info = self._get_info()
+            params = {
+                "type": "userFillsByTime",
+                "user": address,
+                "startTime": start_time_ms,
+            }
+            if end_time_ms is not None:
+                params["endTime"] = end_time_ms
+            return info.post("/info", params)
+
+        raw = await self._run_in_pool("userFillsByTime", _fetch)
+        return raw if isinstance(raw, list) else []
+
     async def get_user_fills_by_time(
         self,
         address: str,
