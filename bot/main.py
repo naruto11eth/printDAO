@@ -31,6 +31,7 @@ from bot.services.stream_service import (
 )
 from bot.services.liquidation_indexer import LiquidationIndexer
 from bot.services.fill_history_service import FillHistoryService
+from bot.services.cluster_detector import ClusterDetector
 from bot.services.report_service import ReportService
 from bot.routers import general, tracking, polymarket, hyperliquid, settings
 from bot.routers import leaderboard as leaderboard_router
@@ -160,14 +161,18 @@ async def main() -> None:
     dp["liquidation_indexer"] = liquidation_indexer
     dp["fill_history_service"] = fill_history_service
 
-    # Both the liquidation indexer and the fill-history tail consume the same
-    # stream — compose so one event goes through both handlers before xack.
+    cluster_detector = ClusterDetector(redis_client, event_producer)
+    dp["cluster_detector"] = cluster_detector
+
+    # All three (liquidations, fill history, cluster detector) consume the same
+    # stream — compose so one event fans out through every handler before xack.
     event_bus_consumer = EventBusConsumer(
         redis_client,
         handlers={
             "stream:user_events:hl": compose_handlers(
                 liquidation_indexer.handle,
                 fill_history_service.handle_user_event,
+                cluster_detector.handle,
             ),
         },
     )

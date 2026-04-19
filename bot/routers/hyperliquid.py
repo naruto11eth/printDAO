@@ -1070,6 +1070,77 @@ async def cmd_liquidations(
     await message.reply("\n".join(lines), parse_mode="HTML")
 
 
+@router.message(Command("clusters"))
+async def cmd_clusters(
+    message: Message,
+    command: CommandObject,
+    redis_client: Optional[RedisClient] = None,
+) -> None:
+    """Recent TWAP/accumulation clusters detected by the bot.
+
+    Usage:
+      /clusters            — last 10 globally
+      /clusters 25         — last N (max 50)
+      /clusters 0xABC...   — history for one wallet
+    """
+    if not redis_client:
+        await message.reply("Storage unavailable.")
+        return
+
+    args = (command.args or "").strip().split()
+    n = 10
+    address: Optional[str] = None
+    for a in args:
+        if a.startswith("0x") and len(a) == 42:
+            address = a.lower()
+        else:
+            try:
+                n = max(1, min(50, int(a)))
+            except ValueError:
+                pass
+
+    key = f"hl:clusters:{address}" if address else "hl:clusters"
+    ids = await redis_client.zrange(key, 0, n - 1, desc=True)
+    if not ids:
+        scope = (
+            f"for <code>{escape_html(shorten_address(address))}</code>"
+            if address else ""
+        )
+        await message.reply(f"No clusters detected yet {scope}.", parse_mode="HTML")
+        return
+
+    pipe = redis_client.redis.pipeline(transaction=False)
+    for cid in ids:
+        pipe.hgetall(f"hl:cluster:{cid}")
+    rows = await pipe.execute()
+
+    header = "<b>🧱 Recent accumulation/distribution clusters</b>"
+    if address:
+        header = (
+            f"<b>🧱 Clusters for</b> "
+            f"<code>{escape_html(shorten_address(address))}</code>"
+        )
+    lines = [header, ""]
+    for data in rows:
+        if not data:
+            continue
+        coin = data.get("coin", "?")
+        direction = data.get("direction", "?")
+        notional = float(data.get("total_notional", 0) or 0)
+        fills = int(float(data.get("fill_count", 0) or 0))
+        duration = float(data.get("duration_seconds", 0) or 0)
+        addr_short = shorten_address(data.get("address", ""))
+        arrow = "⬆️" if direction == "accumulation" else "⬇️"
+        lines.append(
+            f"{arrow} <code>{escape_html(addr_short)}</code> "
+            f"<b>{escape_html(coin)}</b> — "
+            f"{_format_usd_short(notional)} "
+            f"over {fills} fills / {int(duration)}s",
+        )
+
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
 @router.message(Command("hl_indexed"))
 async def cmd_hl_indexed(
     message: Message,
