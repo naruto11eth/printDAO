@@ -27,8 +27,10 @@ from bot.services.stream_service import (
     TradeStreamConsumer,
     EventBusProducer,
     EventBusConsumer,
+    compose_handlers,
 )
 from bot.services.liquidation_indexer import LiquidationIndexer
+from bot.services.fill_history_service import FillHistoryService
 from bot.services.report_service import ReportService
 from bot.routers import general, tracking, polymarket, hyperliquid, settings
 from bot.routers import leaderboard as leaderboard_router
@@ -105,10 +107,17 @@ async def main() -> None:
     # Initialize configurable whale detector
     whale_detector = ConfigurableWhaleDetector(redis_client=redis_client)
 
+    # Initialize fill history first — analytics_service wraps it.
+    fill_history_service = FillHistoryService(
+        hl_client=hyperliquid_client,
+        redis_client=redis_client,
+    )
+
     # Initialize analytics service
     analytics_service = AnalyticsService(
         hl_client=hyperliquid_client,
         redis=redis_client,
+        fill_history=fill_history_service,
     )
 
     # Initialize copy trading service
@@ -149,10 +158,18 @@ async def main() -> None:
 
     liquidation_indexer = LiquidationIndexer(redis_client, event_producer)
     dp["liquidation_indexer"] = liquidation_indexer
+    dp["fill_history_service"] = fill_history_service
 
+    # Both the liquidation indexer and the fill-history tail consume the same
+    # stream — compose so one event goes through both handlers before xack.
     event_bus_consumer = EventBusConsumer(
         redis_client,
-        handlers={"stream:user_events:hl": liquidation_indexer.handle},
+        handlers={
+            "stream:user_events:hl": compose_handlers(
+                liquidation_indexer.handle,
+                fill_history_service.handle_user_event,
+            ),
+        },
     )
     dp["event_bus_consumer"] = event_bus_consumer
 
@@ -185,8 +202,11 @@ async def main() -> None:
         # Start Position indexer
         await position_indexer.start()
 
-        # Start event-bus consumer (processes stream:user_events:hl → liquidations)
+        # Start event-bus consumer (processes stream:user_events:hl → liquidations + fills)
         await event_bus_consumer.start()
+
+        # Start fill-history backfill scanner (backfills watchlist wallets)
+        await fill_history_service.start_scanner()
 
         # Start market monitor scheduler
         await market_scheduler.start()
@@ -198,6 +218,8 @@ async def main() -> None:
         logger.info("Shutting down...")
         # Stop scheduler
         await market_scheduler.stop()
+        # Stop fill-history scanner before consumer (scanner also uses hl_client)
+        await fill_history_service.stop_scanner()
         # Stop event bus consumer
         await event_bus_consumer.stop()
         # Stop indexers
